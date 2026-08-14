@@ -1,0 +1,22 @@
+# Vitals runtime dependencies.
+#
+# The GUI is built on GTK4 + libadwaita through PyGObject. On Linux these are
+# best installed from the distribution's packages rather than pip, because they
+# are bindings to system libraries:
+#
+#   Ubuntu / Debian:  sudo apt install python3-gi python3-psutil \
+#                                      gir1.2-gtk-4.0 gir1.2-adw-1 \
+#                                      gir1.2-webkit-6.0
+#   Fedora:           sudo dnf install python3-gobject python3-psutil \
+#                                      gtk4 libadwaita webkitgtk6.0
+#   Arch:             sudo pacman -S python-gobject python-psutil gtk4 \
+#                                    libadwaita webkitgtk-6.0
+#
+# gir1.2-webkit-6.0 provides the web console in the top half of the window. If
+# you cannot install packages, ./tools/setup_webkit.sh unpacks it into vendor/
+# without root. Without it the monitor still runs and the web half explains how
+# to enable itself.
+#
+# Listed here for completeness; pip-installing PyGObject requires GTK4 headers.
+psutil>=5.9
+PyGObject>=3.44

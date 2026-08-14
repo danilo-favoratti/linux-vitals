@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.png
+!docs/*.png
+!assets/icon-master.png
+!assets/icons/*.png
+.ruff_cache/
+# Locally unpacked WebKit typelibs (see tools/setup_webkit.sh)
+vendor/
