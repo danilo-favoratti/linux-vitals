@@ -18,11 +18,13 @@ from . import theme  # noqa: E402
 _RGBA_CACHE: dict[tuple[str, float], Gdk.RGBA] = {}
 
 
-def rgba(color: str, alpha: float = 1.0) -> Gdk.RGBA:
-    key = (color, round(alpha, 3))
+def rgba(color: theme.Paint, alpha: float = 1.0) -> Gdk.RGBA:
+    # Keyed by the resolved value, so a palette token picks up a new entry after
+    # a theme switch instead of being served the previous theme's color.
+    key = (str(color), round(alpha, 3))
     cached = _RGBA_CACHE.get(key)
     if cached is None:
-        r, g, b = theme.rgb(color)
+        r, g, b = theme.rgb(key[0])
         cached = Gdk.RGBA(red=r, green=g, blue=b, alpha=alpha)
         _RGBA_CACHE[key] = cached
     return cached
@@ -34,7 +36,7 @@ def rect(x: float, y: float, w: float, h: float) -> Graphene.Rect:
 
 def fill_rect(
     snapshot: Gtk.Snapshot, x: float, y: float, w: float, h: float,
-    color: str, alpha: float = 1.0,
+    color: theme.Paint, alpha: float = 1.0,
 ) -> None:
     if w <= 0 or h <= 0:
         return
@@ -56,7 +58,7 @@ def rounded_rect(
 
 def fill_rounded(
     snapshot: Gtk.Snapshot, x: float, y: float, w: float, h: float,
-    radius: float, color: str, alpha: float = 1.0,
+    radius: float, color: theme.Paint, alpha: float = 1.0,
 ) -> None:
     if w <= 0 or h <= 0:
         return
@@ -67,7 +69,7 @@ def fill_rounded(
 
 def fill_circle(
     snapshot: Gtk.Snapshot, cx: float, cy: float, radius: float,
-    color: str, alpha: float = 1.0,
+    color: theme.Paint, alpha: float = 1.0,
 ) -> None:
     fill_rounded(snapshot, cx - radius, cy - radius, radius * 2, radius * 2,
                  radius, color, alpha)
@@ -75,7 +77,7 @@ def fill_circle(
 
 def stroke(
     snapshot: Gtk.Snapshot, path: Gsk.Path, width: float,
-    color: str, alpha: float = 1.0, round_ends: bool = True,
+    color: theme.Paint, alpha: float = 1.0, round_ends: bool = True,
 ) -> None:
     line = Gsk.Stroke.new(width)
     if round_ends:
@@ -86,7 +88,7 @@ def stroke(
 
 def stroke_line(
     snapshot: Gtk.Snapshot, x1: float, y1: float, x2: float, y2: float,
-    width: float, color: str, alpha: float = 1.0,
+    width: float, color: theme.Paint, alpha: float = 1.0,
 ) -> None:
     builder = Gsk.PathBuilder.new()
     builder.move_to(x1, y1)
@@ -96,7 +98,7 @@ def stroke_line(
 
 def gradient_fill(
     snapshot: Gtk.Snapshot, path: Gsk.Path, area: Graphene.Rect,
-    color: str, top_alpha: float = 0.42, bottom_alpha: float = 0.02,
+    color: theme.Paint, top_alpha: float = 0.42, bottom_alpha: float = 0.02,
 ) -> None:
     """Fill a path with a vertical fade of a single hue."""
     snapshot.push_fill(path, Gsk.FillRule.WINDING)
@@ -155,7 +157,7 @@ def text(
     y: float,
     label: str,
     size: float = 10,
-    color: str = theme.TEXT,
+    color: theme.Paint = theme.TEXT,
     bold: bool = False,
     align: str = "left",
     alpha: float = 1.0,

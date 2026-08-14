@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the window to PNGs, one per web tab / monitor page combination.
+"""Render the window to PNGs: every web tab and monitor page, in both themes.
 
 Development helper used to eyeball the layout without a screenshot tool.
 Usage: python3 tools/capture.py [output_dir]
@@ -18,6 +18,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
+from vitals import theme  # noqa: E402
 from vitals.app import VitalsApp, VitalsWindow  # noqa: E402
 from vitals.sampler import Sampler  # noqa: E402
 
@@ -58,8 +59,14 @@ def main() -> int:
         window._schedule()
         window.present()
 
-        def step(name: str, page: str, tab: str | None = None):
+        def step(name: str, page: str, tab: str | None = None,
+                 mode: str | None = None):
             def run() -> None:
+                if mode is not None:
+                    # Deliberately not app.set_theme(): capturing screenshots
+                    # should not rewrite the user's saved preference.
+                    theme.set_mode(mode)
+                    app.refresh_theme()
                 window.monitor.show_page(page)
                 if tab is not None and window.web is not None:
                     window.web.show_tab(tab)
@@ -72,6 +79,9 @@ def main() -> int:
         queue = [step(f"tab-{tab}", "overview", tab)
                  for tab in ("logs", "internal", "dashboard")]
         queue += [step(f"dashboard-{page}", page, "dashboard") for page in PAGES]
+        queue += [step(f"light-{page}", page, "dashboard",
+                       mode="light" if index == 0 else None)
+                  for index, page in enumerate(PAGES)]
 
         def next_shot() -> bool:
             if not queue:

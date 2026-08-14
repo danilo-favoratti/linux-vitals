@@ -29,7 +29,7 @@ def nice_ceiling(value: float) -> float:
 @dataclass
 class Trace:
     series: Series
-    color: str
+    color: theme.Paint
     label: str = ""
     fill: bool = True
 
@@ -213,7 +213,7 @@ class CoreTile(Gtk.Widget):
 class Ring(Gtk.Widget):
     """Donut gauge with a centered value and caption."""
 
-    def __init__(self, color: str, size: int = 116, caption: str = "") -> None:
+    def __init__(self, color: theme.Paint, size: int = 116, caption: str = "") -> None:
         super().__init__()
         self.color = color
         self.value = 0.0
@@ -270,7 +270,7 @@ class SegmentBar(Gtk.Widget):
 
     def __init__(self, height: int = 34) -> None:
         super().__init__()
-        self.segments: list[tuple[str, float, str]] = []
+        self.segments: list[tuple[str, float, theme.Paint]] = []
         self.total = 1.0
         self._height = height
         self.set_hexpand(True)
@@ -280,7 +280,7 @@ class SegmentBar(Gtk.Widget):
             return (self._height, self._height, -1, -1)
         return (140, 260, -1, -1)
 
-    def update(self, segments: list[tuple[str, float, str]], total: float) -> None:
+    def update(self, segments: list[tuple[str, float, theme.Paint]], total: float) -> None:
         self.segments = segments
         self.total = max(1.0, total)
         self.queue_draw()
@@ -362,7 +362,7 @@ class Bars(Gtk.Widget):
 class Dot(Gtk.Widget):
     """Small accent dot used in card headers."""
 
-    def __init__(self, color: str, size: int = 8) -> None:
+    def __init__(self, color: theme.Paint, size: int = 8) -> None:
         super().__init__()
         self.color = color
         self._size = size
@@ -382,7 +382,7 @@ class Dot(Gtk.Widget):
 class MiniBar(Gtk.Widget):
     """Thin proportional bar used in list rows."""
 
-    def __init__(self, color: str, height: int = 6) -> None:
+    def __init__(self, color: theme.Paint, height: int = 6) -> None:
         super().__init__()
         self.color = color
         self.fraction = 0.0

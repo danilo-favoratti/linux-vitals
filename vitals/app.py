@@ -18,7 +18,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import bootstrap, theme  # noqa: E402
+from . import bootstrap, prefs, theme  # noqa: E402
 from .config import (  # noqa: E402
     APP_ID,
     APP_NAME,
@@ -34,6 +34,20 @@ from .sampler import Sampler  # noqa: E402
 # Process enumeration dominates the tick cost, so when its table is hidden we
 # only refresh it occasionally to keep counters and GPU client names current.
 BACKGROUND_PROC_EVERY = 4
+
+
+def redraw_tree(widget: Gtk.Widget) -> None:
+    """Invalidate every widget below (and including) this one.
+
+    The charts read the palette while they snapshot, so a theme switch stays
+    invisible on them until each one is asked to draw again; reloading the CSS
+    only refreshes what the stylesheet itself covers.
+    """
+    widget.queue_draw()
+    child = widget.get_first_child()
+    while child is not None:
+        redraw_tree(child)
+        child = child.get_next_sibling()
 
 
 def portrait_size(display: Gdk.Display | None) -> tuple[int, int]:
@@ -98,6 +112,7 @@ class VitalsWindow(Adw.ApplicationWindow):
         toolbar.add_top_bar(header)
         toolbar.set_content(content)
         header.pack_end(self._build_menu())
+        header.pack_end(self._build_theme_button())
         self.toast_overlay.set_child(toolbar)
         self.set_content(self.toast_overlay)
 
@@ -148,6 +163,23 @@ class VitalsWindow(Adw.ApplicationWindow):
 
     # -- chrome ----------------------------------------------------------
 
+    def _build_theme_button(self) -> Gtk.Button:
+        self.theme_button = Gtk.Button()
+        self.theme_button.connect("clicked", lambda *_: self.toggle_theme())
+        self._sync_theme_button()
+        return self.theme_button
+
+    def _sync_theme_button(self) -> None:
+        """Show the theme the button switches to, not the one in use."""
+        going_light = theme.is_dark()
+        self.theme_button.set_icon_name(
+            "weather-clear-symbolic" if going_light
+            else "weather-clear-night-symbolic"
+        )
+        self.theme_button.set_tooltip_text(
+            f"Switch to the {'light' if going_light else 'dark'} theme (Ctrl+T)"
+        )
+
     def _build_menu(self) -> Gtk.MenuButton:
         menu = Gio.Menu()
 
@@ -172,6 +204,7 @@ class VitalsWindow(Adw.ApplicationWindow):
 
         other = Gio.Menu()
         other.append("Pause updates", "win.pause")
+        other.append("Light theme", "win.light-theme")
         if self.paned is not None:
             other.append("Even split", "win.even-split")
             other.append("Reset to 9:16", "win.reset-shape")
@@ -198,6 +231,12 @@ class VitalsWindow(Adw.ApplicationWindow):
 
         simple("pause", lambda: self.monitor.pause_button.set_active(not self.paused))
         simple("about", self._show_about)
+
+        self.light_action = Gio.SimpleAction.new_stateful(
+            "light-theme", None, GLib.Variant.new_boolean(not theme.is_dark())
+        )
+        self.light_action.connect("activate", lambda *_: self.toggle_theme())
+        self.add_action(self.light_action)
 
         if self.paned is not None:
             simple("even-split", self._even_split)
@@ -229,6 +268,7 @@ class VitalsWindow(Adw.ApplicationWindow):
         add("<Control>space", lambda: self.monitor.pause_button.set_active(
             not self.paused))
         add("<Control>f", self.monitor.focus_search)
+        add("<Control>t", self.toggle_theme)
         add("F5", self._refresh_now)
         for index, name in enumerate(PAGES, start=1):
             add(f"<Control>{index}", lambda n=name: self.monitor.show_page(n))
@@ -244,6 +284,23 @@ class VitalsWindow(Adw.ApplicationWindow):
             add("<Control>0", lambda: self.web.apply_zoom(reset=True))
 
         self.add_controller(controller)
+
+    # -- theme -----------------------------------------------------------
+
+    def toggle_theme(self) -> None:
+        mode = "dark" if theme.mode == "light" else "light"
+        app = self.get_application()
+        if isinstance(app, VitalsApp):
+            app.set_theme(mode)
+        self._toast(f"{mode.capitalize()} theme")
+
+    def on_theme_changed(self) -> None:
+        """Follow-up work the stylesheet cannot do on its own."""
+        self._sync_theme_button()
+        self.light_action.set_state(GLib.Variant.new_boolean(not theme.is_dark()))
+        if self.web is not None:
+            self.web.apply_theme()
+        redraw_tree(self)
 
     # -- actions ---------------------------------------------------------
 
@@ -346,18 +403,34 @@ class VitalsApp(Adw.Application):
                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.monitor_only = monitor_only
         self.sampler: Sampler | None = None
+        self.css = Gtk.CssProvider()
         self.connect("shutdown", self._on_shutdown)
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
-        provider = Gtk.CssProvider()
-        provider.load_from_data(theme.CSS.encode())
+        theme.set_mode(prefs.load().get("theme", theme.DEFAULT_MODE))
         display = Gdk.Display.get_default()
         if display is not None:
             Gtk.StyleContext.add_provider_for_display(
-                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                display, self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
+        self.refresh_theme()
+
+    def set_theme(self, mode: str) -> None:
+        theme.set_mode(mode)
+        prefs.save(theme=theme.mode)
+        self.refresh_theme()
+
+    def refresh_theme(self) -> None:
+        """Push the active palette into libadwaita, the CSS and the windows."""
+        Adw.StyleManager.get_default().set_color_scheme(
+            Adw.ColorScheme.FORCE_DARK if theme.is_dark()
+            else Adw.ColorScheme.FORCE_LIGHT
+        )
+        self.css.load_from_data(theme.css().encode())
+        for window in self.get_windows():
+            if isinstance(window, VitalsWindow):
+                window.on_theme_changed()
 
     def do_activate(self) -> None:
         window = self.props.active_window

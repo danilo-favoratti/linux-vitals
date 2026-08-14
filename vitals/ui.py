@@ -7,6 +7,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
+from . import theme  # noqa: E402
 from .widgets import Dot, MiniBar  # noqa: E402
 
 ELLIPSIZE_END = 3  # Pango.EllipsizeMode.END, without importing Pango
@@ -29,7 +30,8 @@ def width_probe(callback) -> Gtk.Widget:
 class Card(Gtk.Box):
     """Titled panel with an optional right-aligned header slot."""
 
-    def __init__(self, title: str, accent: str | None = None, spacing: int = 8) -> None:
+    def __init__(self, title: str, accent: theme.Paint | None = None,
+                 spacing: int = 8) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=spacing)
         self.add_css_class("card")
         self.set_margin_start(0)
@@ -227,7 +229,7 @@ class ReflowGrid(Gtk.Box):
 class TopList(Gtk.Box):
     """Fixed set of reused rows showing 'name — bar — value' entries."""
 
-    def __init__(self, color: str, rows: int = 6, name_width: int = 148,
+    def __init__(self, color: theme.Paint, rows: int = 6, name_width: int = 148,
                  value_width: int = 84) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._rows: list[tuple[Gtk.Box, Gtk.Label, MiniBar, Gtk.Label]] = []

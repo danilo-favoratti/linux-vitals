@@ -333,6 +333,15 @@ class WebPane(Gtk.Box):
     def open_externally(self) -> None:
         open_externally(self, self.current.current_uri)
 
+    def apply_theme(self) -> None:
+        """Re-set the backdrop: WebKit stores the color, not the palette token.
+
+        It shows through before a page paints and around short pages, so leaving
+        it behind would flash the old theme on every load.
+        """
+        for tab in self.tabs.values():
+            tab.view.set_background_color(draw.rgba(theme.BG_WINDOW))
+
     def apply_zoom(self, delta: float = 0.0, reset: bool = False) -> float:
         self.zoom = DEFAULT_ZOOM if reset else min(
             MAX_ZOOM, max(MIN_ZOOM, self.zoom + delta)

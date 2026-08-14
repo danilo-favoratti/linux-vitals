@@ -38,6 +38,9 @@ def _switcher(stack: Adw.ViewStack) -> Gtk.Widget:
 class MonitorView(Gtk.Box):
     def __init__(self, sampler: Sampler, toast_overlay: Adw.ToastOverlay) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        # Carries the monitor's own surface colors, which the web half above it
+        # does not share.
+        self.add_css_class("monitor-pane")
         self.sampler = sampler
 
         self.stack = Adw.ViewStack()
@@ -65,7 +68,7 @@ class MonitorView(Gtk.Box):
         self.pause_button.set_tooltip_text("Pause updates (Space)")
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        bar.add_css_class("pane-bar")
+        bar.add_css_class("switcher-bar")
         bar.set_margin_start(6)
         bar.set_margin_end(6)
         switcher = _switcher(self.stack)

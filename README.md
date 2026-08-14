@@ -13,6 +13,10 @@ with GSK, so there is no charting dependency and rendering is GPU-accelerated.
   <img src="docs/cpu.png" width="265" alt="CPU">
   <img src="docs/processes.png" width="265" alt="Processes">
 </p>
+<p align="center">
+  <img src="docs/light.png" width="265" alt="Overview, light theme">
+  <img src="docs/light-cpu.png" width="265" alt="CPU, light theme">
+</p>
 
 ## Layout
 
@@ -29,6 +33,30 @@ buttons instead of a blank page.
 
 Drag the divider to give either half more room, or use **Even split** and
 **Reset to 9:16** in the menu. `--monitor-only` starts without the web half.
+
+## Themes
+
+Dark and light, switched with the sun/moon button in the header bar, `Ctrl+T`,
+or **Light theme** in the menu. The choice is remembered in
+`~/.config/vitals/settings.json`.
+
+The light theme is a warm cream monitor with dusty pastel accents rather than
+white with saturated ones. It covers the monitor half only: the header bar and
+the surface behind the web console stay neutral, so the pages up there look the
+way they were designed to. The web console still follows light or dark, since
+its pages read the preference the desktop reports.
+
+Both palettes are in `vitals/theme.py`. Accents are picked per palette rather
+than shared, because hues tuned for thin lines on near-black go washed out on a
+pale card. Two details worth knowing before editing it:
+
+- Charts hold on to the color they were built with, so palette entries are
+  tokens that resolve on every use — a `theme.CPU` handed to a chart at startup
+  still follows a later switch. Pass tokens, not hex strings, to anything that
+  keeps a color.
+- The monitor pane sets libadwaita's own color variables on itself, which is how
+  stock widgets inside it (the process search entry, the buttons) end up on the
+  same palette as the cards without the web half being affected.
 
 ## Monitor pages
 
@@ -110,6 +138,7 @@ To install a desktop launcher for the current user:
 | `Ctrl++`, `Ctrl+-`, `Ctrl+0` | Zoom the web console in, out, or back to default |
 | `Ctrl+1` – `Ctrl+6` | Jump to Overview, CPU, Memory, Network, GPU or Processes |
 | `Ctrl+Space` | Pause or resume updates |
+| `Ctrl+T` | Switch between the light and dark theme |
 | `Ctrl+F` | Search the process list |
 | `F5` | Refresh the monitor immediately |
 | `Ctrl+Q` | Quit |
@@ -153,11 +182,13 @@ main.py              launcher
 vitals/
   bootstrap.py       makes the WebKit typelibs importable
   config.py          app identity, web tab URLs, refresh rates
+  prefs.py           the remembered theme choice
   app.py             portrait window, actions, tick loop
   webpane.py         web console: tabs, session, error handling
   monitor.py         monitor half: pages and switcher
   sampler.py         metric collection and rolling history
   gpu.py             NVIDIA telemetry backend
+  theme.py           light and dark palettes, stylesheet, formatting
   draw.py            GSK drawing primitives
   widgets.py         charts, gauges, bars, core tiles
   ui.py              cards, responsive grids, layout helpers
@@ -173,7 +204,7 @@ vendor/              locally unpacked WebKit typelibs (git-ignored)
 python3 tools/bench.py                 # time the sampling paths
 python3 tools/test_proc_parse.py       # cross-check /proc parsing vs psutil
 python3 tools/test_process_render.py   # verify the table renders correct rows
-python3 tools/capture.py /tmp/shots    # screenshot each tab/page combination
+python3 tools/capture.py /tmp/shots    # screenshot every tab and page, both themes
 ```
 
 ## Changing the URLs
