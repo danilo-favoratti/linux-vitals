@@ -1,9 +1,9 @@
 # Vitals
 
 A 9:16 portrait desk panel for Linux. The top half is an internal web console
-with two tabs (Logs and Dashboard); the bottom half is a real-time system
-monitor covering CPU per core, memory, swap, network, disk, processes and GPU —
-including video processor load and video memory.
+with three tabs (Dashboard, Logs and Internal); the bottom half is a real-time
+system monitor covering CPU per core, memory, swap, network, disk, processes and
+GPU — including video processor load and video memory.
 
 Built with GTK4 + libadwaita, WebKitGTK and PyGObject. Charts are drawn directly
 with GSK, so there is no charting dependency and rendering is GPU-accelerated.
@@ -19,10 +19,11 @@ with GSK, so there is no charting dependency and rendering is GPU-accelerated.
 The window opens as a 9:16 portrait sized to the screen it lands on, split in
 half by a draggable divider:
 
-🌐 **Web console (top)** — two tabs, `internal/logs` and `internal/dashboard`.
-Both share one browsing session, so signing in once covers both tabs and the
-login survives a restart. A thin progress bar tracks loading, and HTTP errors
-get a readable screen with retry and sign-in buttons instead of a blank page.
+🌐 **Web console (top)** — three tabs: `internal/dashboard` (the one it opens
+on), `internal/logs` and `internal`. They share one browsing session, so signing
+in once covers all of them and the login survives a restart. A thin progress bar
+tracks loading, and HTTP errors get a readable screen with retry and sign-in
+buttons instead of a blank page.
 
 📈 **System monitor (bottom)** — the six pages below, on an icon switcher.
 
@@ -103,7 +104,7 @@ To install a desktop launcher for the current user:
 
 | Shortcut | Action |
 | --- | --- |
-| `Alt+1`, `Alt+2` | Switch to the Logs or Dashboard tab |
+| `Alt+1` – `Alt+3` | Switch to the Dashboard, Logs or Internal tab |
 | `Ctrl+R` | Reload the current web tab |
 | `Alt+←` | Go back in the current web tab |
 | `Ctrl++`, `Ctrl+-`, `Ctrl+0` | Zoom the web console in, out, or back to default |
@@ -131,8 +132,8 @@ Sampling is deliberately cheap so the monitor does not distort what it measures:
   on a background thread, rather than spawning a process per tick.
 - The process table is only refreshed while its page is visible; other pages
   need just the counters.
-- Web tabs load on first use, so the second web process only starts when you
-  switch to it.
+- Web tabs load on first use, so the other web processes only start when you
+  switch to them.
 
 Measured on a machine with ~1850 processes: about 4 ms per tick for the
 whole-system metrics and about 34 ms when the full process list is included.
@@ -177,12 +178,20 @@ python3 tools/capture.py /tmp/shots    # screenshot each tab/page combination
 
 ## Changing the URLs
 
-Both tab URLs live in `vitals/config.py`:
+The tabs live in `vitals/config.py`, in the order they appear. The first entry is
+the tab the window opens on, and `Alt+<n>` follows the same order:
 
 ```python
 TABS = (
-    ("logs", "Logs", "view-list-symbolic", "https://cupidoodle.com/internal/logs"),
     ("dashboard", "Dashboard", "view-grid-symbolic",
      "https://cupidoodle.com/internal/dashboard"),
+    ("logs", "Logs", "view-list-symbolic",
+     "https://cupidoodle.com/internal/logs"),
+    ("internal", "Internal", "emblem-system-symbolic",
+     "https://www.cupidoodle.com/internal"),
 )
 ```
+
+Adding or removing an entry is enough: the switcher, the shortcuts and the
+lazy-loading all follow. Icon names must exist in the current icon theme, or
+the switcher shows a missing-image box.

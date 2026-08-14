@@ -16,7 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 from vitals.app import VitalsApp, VitalsWindow  # noqa: E402
 from vitals.sampler import Sampler  # noqa: E402
@@ -47,6 +47,9 @@ def capture(window: Gtk.Window, path: pathlib.Path) -> bool:
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     app = VitalsApp()
+    # Without this, an already running Vitals takes over the launch through
+    # GApplication's single-instance handling and nothing gets captured.
+    app.set_flags(app.get_flags() | Gio.ApplicationFlags.NON_UNIQUE)
 
     def on_activate(_app) -> None:
         app.sampler = Sampler()
@@ -66,7 +69,8 @@ def main() -> int:
                     window.monitor.process_page.search.set_text(PROCESS_FILTER)
             return name, run
 
-        queue = [step("logs-overview", "overview", "logs")]
+        queue = [step(f"tab-{tab}", "overview", tab)
+                 for tab in ("logs", "internal", "dashboard")]
         queue += [step(f"dashboard-{page}", page, "dashboard") for page in PAGES]
 
         def next_shot() -> bool:

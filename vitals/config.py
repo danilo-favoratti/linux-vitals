@@ -6,12 +6,15 @@ APP_ID = "dev.favoratti.Vitals"
 APP_NAME = "Vitals"
 VERSION = "2.0.0"
 
-# The two pages of the internal web console, in tab order.
+# The pages of the internal web console, in tab order. The first one is the tab
+# the window opens on.
 TABS = (
-    ("logs", "Logs", "view-list-symbolic",
-     "https://cupidoodle.com/internal/logs"),
     ("dashboard", "Dashboard", "view-grid-symbolic",
      "https://cupidoodle.com/internal/dashboard"),
+    ("logs", "Logs", "view-list-symbolic",
+     "https://cupidoodle.com/internal/logs"),
+    ("internal", "Internal", "emblem-system-symbolic",
+     "https://www.cupidoodle.com/internal"),
 )
 
 INTERVALS = (500, 1000, 2000, 3000)
