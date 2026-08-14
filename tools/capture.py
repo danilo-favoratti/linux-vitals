@@ -20,6 +20,7 @@ from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
 from vitals import theme  # noqa: E402
 from vitals.app import VitalsApp, VitalsWindow  # noqa: E402
+from vitals.config import TABS  # noqa: E402
 from vitals.sampler import Sampler  # noqa: E402
 
 OUT_DIR = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/vitals-shots")
@@ -76,8 +77,7 @@ def main() -> int:
                     window.monitor.process_page.search.set_text(PROCESS_FILTER)
             return name, run
 
-        queue = [step(f"tab-{tab}", "overview", tab)
-                 for tab in ("logs", "internal", "dashboard")]
+        queue = [step(f"tab-{key}", "overview", key) for key, *_rest in TABS]
         queue += [step(f"dashboard-{page}", page, "dashboard") for page in PAGES]
         queue += [step(f"light-{page}", page, "dashboard",
                        mode="light" if index == 0 else None)

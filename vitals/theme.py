@@ -234,6 +234,9 @@ window.vitals {{ background-color: {BG_WINDOW}; }}
     font-feature-settings: "tnum";
 }}
 .web-tabs {{ font-size: 12px; }}
+/* Four labelled tabs only fit the portrait header with tighter toggles than the
+   8px libadwaita default. */
+.web-tabs toggle {{ padding-left: 6px; padding-right: 6px; }}
 paned > separator {{
     background-color: {BORDER};
     min-height: 4px;

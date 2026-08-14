@@ -151,7 +151,9 @@ class VitalsWindow(Adw.ApplicationWindow):
         box.append(title)
         box.append(hint)
 
-        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        # Wraps rather than clips: one button per tab overruns the portrait width
+        # as soon as the window is narrowed.
+        buttons = Adw.WrapBox(child_spacing=8, line_spacing=8)
         buttons.set_halign(Gtk.Align.CENTER)
         for _key, label, _icon, url in TABS:
             button = Gtk.Button(label=f"Open {label}")

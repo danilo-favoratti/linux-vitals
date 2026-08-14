@@ -13,6 +13,8 @@ TABS = (
      "https://cupidoodle.com/internal/dashboard"),
     ("logs", "Logs", "view-list-symbolic",
      "https://cupidoodle.com/internal/logs"),
+    ("funnel", "Funnel", "view-sort-descending-symbolic",
+     "https://cupidoodle.com/internal/selling-funnel"),
     ("internal", "Internal", "emblem-system-symbolic",
      "https://www.cupidoodle.com/internal"),
 )

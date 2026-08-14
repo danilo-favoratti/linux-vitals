@@ -1,9 +1,9 @@
 # Vitals
 
 A 9:16 portrait desk panel for Linux. The top half is an internal web console
-with three tabs (Dashboard, Logs and Internal); the bottom half is a real-time
-system monitor covering CPU per core, memory, swap, network, disk, processes and
-GPU — including video processor load and video memory.
+with four tabs (Dashboard, Logs, Funnel and Internal); the bottom half is a
+real-time system monitor covering CPU per core, memory, swap, network, disk,
+processes and GPU — including video processor load and video memory.
 
 Built with GTK4 + libadwaita, WebKitGTK and PyGObject. Charts are drawn directly
 with GSK, so there is no charting dependency and rendering is GPU-accelerated.
@@ -23,11 +23,11 @@ with GSK, so there is no charting dependency and rendering is GPU-accelerated.
 The window opens as a 9:16 portrait sized to the screen it lands on, split in
 half by a draggable divider:
 
-🌐 **Web console (top)** — three tabs: `internal/dashboard` (the one it opens
-on), `internal/logs` and `internal`. They share one browsing session, so signing
-in once covers all of them and the login survives a restart. A thin progress bar
-tracks loading, and HTTP errors get a readable screen with retry and sign-in
-buttons instead of a blank page.
+🌐 **Web console (top)** — four tabs: `internal/dashboard` (the one it opens on),
+`internal/logs`, `internal/selling-funnel` and `internal`. They share one
+browsing session, so signing in once covers all of them and the login survives a
+restart. A thin progress bar tracks loading, and HTTP errors get a readable
+screen with retry and sign-in buttons instead of a blank page.
 
 📈 **System monitor (bottom)** — the six pages below, on an icon switcher.
 
@@ -132,7 +132,7 @@ To install a desktop launcher for the current user:
 
 | Shortcut | Action |
 | --- | --- |
-| `Alt+1` – `Alt+3` | Switch to the Dashboard, Logs or Internal tab |
+| `Alt+1` – `Alt+4` | Switch to the Dashboard, Logs, Funnel or Internal tab |
 | `Ctrl+R` | Reload the current web tab |
 | `Alt+←` | Go back in the current web tab |
 | `Ctrl++`, `Ctrl+-`, `Ctrl+0` | Zoom the web console in, out, or back to default |
@@ -218,6 +218,8 @@ TABS = (
      "https://cupidoodle.com/internal/dashboard"),
     ("logs", "Logs", "view-list-symbolic",
      "https://cupidoodle.com/internal/logs"),
+    ("funnel", "Funnel", "view-sort-descending-symbolic",
+     "https://cupidoodle.com/internal/selling-funnel"),
     ("internal", "Internal", "emblem-system-symbolic",
      "https://www.cupidoodle.com/internal"),
 )
@@ -225,4 +227,8 @@ TABS = (
 
 Adding or removing an entry is enough: the switcher, the shortcuts and the
 lazy-loading all follow. Icon names must exist in the current icon theme, or
-the switcher shows a missing-image box.
+the switcher shows a missing-image box — Adwaita has no funnel or filter icon,
+which is why the funnel tab borrows the descending-sort glyph.
+
+Four labelled tabs are about as many as the portrait header fits. Beyond that,
+either shorten the labels or drop to an icon-only switcher.
