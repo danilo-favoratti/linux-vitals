@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import os
 import pwd
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -20,6 +21,10 @@ PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 # Temperatures move slowly and psutil's sensor scan is by far the most
 # expensive whole-system call, so it runs on its own slower cadence.
 TEMP_EVERY = 5
+
+# Process enumeration dominates the tick cost, so when its table is hidden we
+# only refresh it occasionally to keep counters and GPU client names current.
+BACKGROUND_PROC_EVERY = 4
 
 _PROC_STATES = {
     "R": "running", "S": "sleeping", "D": "disk-sleep", "Z": "zombie",
@@ -51,6 +56,43 @@ def _parse_stat(raw: bytes) -> tuple[str, int, str, int, int, int]:
     return comm, ppid, state, utime + stime, threads, rss_pages
 
 
+# Helper processes that belong to this window, not to stacks Vitals launched.
+_SELF_CHILD_PREFIXES = ("WebKit", "nvidia-smi")
+
+
+def _own_cost_pids(root: int) -> list[int]:
+    """This PID plus WebKit / nvidia-smi descendants — not spawned local apps."""
+    found = [root]
+    stack = [root]
+    seen = {root}
+    while stack:
+        pid = stack.pop()
+        try:
+            tasks = os.listdir(f"/proc/{pid}/task")
+        except OSError:
+            continue
+        for tid in tasks:
+            try:
+                with open(f"/proc/{pid}/task/{tid}/children", encoding="ascii") as handle:
+                    text = handle.read()
+            except OSError:
+                continue
+            for token in text.split():
+                child = int(token)
+                if child in seen:
+                    continue
+                seen.add(child)
+                try:
+                    with open(f"/proc/{child}/stat", "rb") as handle:
+                        comm = _parse_stat(handle.read())[0]
+                except (OSError, ValueError, IndexError):
+                    continue
+                if comm.startswith(_SELF_CHILD_PREFIXES):
+                    found.append(child)
+                    stack.append(child)
+    return found
+
+
 class Series:
     """Fixed-length ring buffer of floats, oldest first.
 
@@ -58,26 +100,36 @@ class Series:
     the right edge instead of showing a false flat line at zero.
     """
 
-    __slots__ = ("data", "maxlen", "filled")
+    __slots__ = ("data", "maxlen", "filled", "_peak")
 
     def __init__(self, maxlen: int = HISTORY_LEN) -> None:
         self.maxlen = maxlen
         self.filled = 0
+        self._peak = 0.0
         self.data: collections.deque[float] = collections.deque(
             [0.0] * maxlen, maxlen=maxlen
         )
 
     def push(self, value: float) -> None:
-        self.data.append(float(value))
+        value = float(value)
+        dropped = self.data[0] if self.filled >= self.maxlen else None
+        self.data.append(value)
         if self.filled < self.maxlen:
             self.filled += 1
+            if value > self._peak:
+                self._peak = value
+            return
+        if value >= self._peak:
+            self._peak = value
+        elif dropped is not None and dropped >= self._peak:
+            self._peak = max(self.data) if self.data else 0.0
 
     @property
     def latest(self) -> float:
         return self.data[-1]
 
     def peak(self) -> float:
-        return max(self.real_values(), default=0.0)
+        return self._peak if self.filled else 0.0
 
     def mean(self) -> float:
         real = self.real_values()
@@ -147,6 +199,9 @@ class Snapshot:
     proc_shown: int = 0      # rows actually listed
     thread_count: int = 0
     uptime: float = 0.0
+    sample_ms: float = 0.0
+    self_cpu: float = 0.0
+    self_rss: float = 0.0
 
 
 class Sampler:
@@ -181,6 +236,9 @@ class Sampler:
         self._proc_ticks: dict[int, int] = {}
         self._last_proc_scan = 0.0
         self._boot_time = psutil.boot_time()
+        self.started_at = time.monotonic()
+        self._self_ticks: dict[int, int] = {}
+        self._self_pid = os.getpid()
         self._last_proc_count = 0
         self._last_thread_count = 0
         self.last_processes: list[ProcRow] = []
@@ -188,9 +246,75 @@ class Sampler:
         # so they are excluded unless explicitly requested.
         self.include_kernel = False
         self.snapshot = Snapshot()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._paused = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._interval_ms = 1000
+        self._tick_count = 0
+        self._want_processes = False
 
         psutil.cpu_percent(percpu=True)  # prime the deltas
         psutil.cpu_percent()
+
+    def start_loop(self, interval_ms: int) -> None:
+        """Run sampling on a worker so a stuck /proc or hwmon read cannot freeze GTK."""
+        self._interval_ms = max(200, interval_ms)
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._paused.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="vitals-sample", daemon=True,
+        )
+        self._thread.start()
+
+    def stop_loop(self) -> None:
+        self._stop.set()
+        self._paused.clear()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._thread = None
+
+    def set_interval_ms(self, interval_ms: int) -> None:
+        self._interval_ms = max(200, interval_ms)
+
+    def set_paused(self, paused: bool) -> None:
+        if paused:
+            self._paused.set()
+        else:
+            self._paused.clear()
+
+    def set_want_processes(self, want: bool) -> None:
+        self._want_processes = want
+
+    def latest(self) -> Snapshot:
+        with self._lock:
+            return self.snapshot
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            if self._paused.is_set():
+                self._stop.wait(0.2)
+                continue
+            started = time.perf_counter()
+            self._tick_count += 1
+            want = (
+                self._want_processes
+                or self._tick_count == 1
+                or self._tick_count % BACKGROUND_PROC_EVERY == 0
+            )
+            try:
+                snap = self.sample(want_processes=want)
+                snap.sample_ms = (time.perf_counter() - started) * 1000
+                with self._lock:
+                    self.snapshot = snap
+            except Exception:
+                pass
+            elapsed = time.perf_counter() - started
+            wait = max(0.05, self._interval_ms / 1000.0 - elapsed)
+            self._stop.wait(wait)
 
     # -- helpers ---------------------------------------------------------
 
@@ -300,10 +424,15 @@ class Sampler:
                 "up": 1.0 if (nic_stat and nic_stat.isup) else 0.0,
                 "speed": float(nic_stat.speed) if nic_stat else 0.0,
             }
-            if name not in self.hist_nic:
-                self.hist_nic[name] = (Series(), Series())
-            self.hist_nic[name][0].push(rx)
-            self.hist_nic[name][1].push(tx)
+            # Docker/veth churn used to grow unbounded history; only keep a
+            # ring buffer for physical NICs, or ones already being shown.
+            if self.is_physical_nic(name) or name in self.hist_nic:
+                if name not in self.hist_nic:
+                    self.hist_nic[name] = (Series(), Series())
+                self.hist_nic[name][0].push(rx)
+                self.hist_nic[name][1].push(tx)
+        for stale in [name for name in self.hist_nic if name not in per_nic]:
+            self.hist_nic.pop(stale, None)
         self._last_net_nic = per_nic
 
         # Disk
@@ -322,8 +451,11 @@ class Sampler:
         self.hist_gpu_temp.push(s.gpu.temperature)
 
         s.uptime = time.time() - self._boot_time
+        s.self_cpu, s.self_rss = self._sample_self(dt)
         if want_processes:
-            s.processes, s.proc_count, s.thread_count = self._sample_processes(s.gpu)
+            s.processes, s.proc_count, s.thread_count = self._sample_processes(
+                s.gpu, s.mem_total or 1,
+            )
             s.proc_shown = len(s.processes)
             self.last_processes = s.processes
             self._last_proc_count = s.proc_count
@@ -331,12 +463,19 @@ class Sampler:
         else:
             # Keep the last known figures so the readouts do not flicker.
             s.processes = self.last_processes
-            s.proc_count = len(psutil.pids())
+            s.proc_count = self._last_proc_count
             s.proc_shown = len(s.processes)
             s.thread_count = self._last_thread_count
 
-        self.snapshot = s
         return s
+
+    def track_nic(self, name: str) -> tuple[Series, Series]:
+        """Start a history ring for a NIC the UI wants to show."""
+        series = self.hist_nic.get(name)
+        if series is None:
+            series = (Series(), Series())
+            self.hist_nic[name] = series
+        return series
 
     def _static_info(self, pid: int, comm: str, ppid: int) -> tuple[str, str, bool]:
         """Return (name, user, is_kernel_thread), cached for the PID's lifetime.
@@ -387,14 +526,37 @@ class Sampler:
             return "unknown"
         return self._static_info(pid, comm, ppid)[0]
 
+    def _sample_self(self, dt: float) -> tuple[float, float]:
+        """CPU % and RSS of this process plus WebKit / nvidia-smi children."""
+        pids = _own_cost_pids(self._self_pid)
+        ticks: dict[int, int] = {}
+        cpu = 0.0
+        rss = 0.0
+        prev = self._self_ticks
+        for pid in pids:
+            try:
+                with open(f"/proc/{pid}/stat", "rb") as handle:
+                    _comm, _ppid, _state, used_ticks, _threads, rss_pages = _parse_stat(
+                        handle.read()
+                    )
+            except (OSError, ValueError, IndexError):
+                continue
+            ticks[pid] = used_ticks
+            rss += rss_pages * PAGE_SIZE
+            previous = prev.get(pid)
+            if previous is not None and dt > 0:
+                cpu += (used_ticks - previous) / CLOCK_TICKS / dt * 100
+        self._self_ticks = ticks
+        return max(0.0, cpu), rss
+
     def _sample_processes(
-        self, gpu_sample: gpu_mod.GpuSample
+        self, gpu_sample: gpu_mod.GpuSample, mem_total: float,
     ) -> tuple[list[ProcRow], int, int]:
         """Read every process from /proc with a single file read each."""
         rows: list[ProcRow] = []
         total_threads = 0
         total = 0
-        mem_total = psutil.virtual_memory().total or 1
+        mem_total = mem_total or 1
         vram_map = gpu_sample.processes
         include_kernel = self.include_kernel
 
@@ -449,10 +611,13 @@ class Sampler:
         return rows, total, total_threads
 
     def shutdown(self) -> None:
+        self.stop_loop()
         self.gpu_backend.shutdown()
 
 
 def kill_process(pid: int, force: bool = False) -> tuple[bool, str]:
+    if pid <= 1 or pid == os.getpid():
+        return False, f"Refusing to signal PID {pid}"
     try:
         proc = psutil.Process(pid)
         name = proc.name()

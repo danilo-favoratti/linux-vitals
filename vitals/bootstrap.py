@@ -18,6 +18,11 @@ import glob
 import os
 import pathlib
 
+# Vulkan on NVIDIA + a rotated Wayland output (the portrait desk panel) often
+# produces a surface that never paints. ngl is GSK's GL renderer and actually
+# shows a window on that setup. Must be set before GTK is initialised.
+os.environ.setdefault("GSK_RENDERER", "ngl")
+
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 VENDOR_TYPELIB_DIR = PROJECT_ROOT / "vendor" / "girepository-1.0"
 TYPELIB = "WebKit-6.0.typelib"

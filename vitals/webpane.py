@@ -26,24 +26,102 @@ MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 0.5, 2.0, 0.9
 # Statuses where the useful next step is "log in", not "retry".
 AUTH_STATUSES = (401, 403, 407)
 
+# The console only talks to the cupidoodle internal apps. Anything else
+# (file:, javascript:, a random https host) stays out of this session.
+_CONSOLE_HOST = "cupidoodle.com"
+
+
+def _webkit_settings() -> WebKit.Settings:
+    settings = WebKit.Settings(
+        enable_developer_extras=True,
+        enable_smooth_scrolling=True,
+        media_playback_requires_user_gesture=True,
+        enable_back_forward_navigation_gestures=True,
+    )
+    # Long-lived dashboards leak renderer memory; skip the page cache so a
+    # reload actually drops it, and ignore APIs this WebKit build lacks.
+    for name, value in (
+        ("enable_page_cache", False),
+        ("enable_offline_web_application_cache", False),
+        ("enable_dns_prefetching", False),
+        ("allow_file_access_from_file_urls", False),
+        ("allow_universal_access_from_file_urls", False),
+        ("allow_top_navigation_to_data_urls", False),
+        ("enable_media", False),
+    ):
+        setter = getattr(settings, f"set_{name}", None)
+        if setter is not None:
+            setter(value)
+    return settings
+
+
+def _apply_memory_pressure(session: WebKit.NetworkSession) -> None:
+    ctor = getattr(WebKit, "MemoryPressureSettings", None)
+    setter = getattr(session, "set_memory_pressure_settings", None)
+    if ctor is None or setter is None:
+        return
+    try:
+        limits = ctor()
+        if hasattr(limits, "set_memory_limit"):
+            limits.set_memory_limit(384)
+        setter(limits)
+    except (TypeError, GLib.Error):
+        pass
+
 
 def make_session() -> WebKit.NetworkSession:
     """A session with cookies on disk, so a login outlives the process."""
     data_dir = os.path.join(GLib.get_user_data_dir(), "vitals", "webkit")
     cache_dir = os.path.join(GLib.get_user_cache_dir(), "vitals", "webkit")
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(data_dir, mode=0o700, exist_ok=True)
+    os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    for path in (data_dir, cache_dir):
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
 
     session = WebKit.NetworkSession.new(data_dir, cache_dir)
+    _apply_memory_pressure(session)
     cookies = session.get_cookie_manager()
-    cookies.set_persistent_storage(
-        os.path.join(data_dir, "cookies.sqlite"), WebKit.CookiePersistentStorage.SQLITE
-    )
-    cookies.set_accept_policy(WebKit.CookieAcceptPolicy.ALWAYS)
+    cookie_path = os.path.join(data_dir, "cookies.sqlite")
+    cookies.set_persistent_storage(cookie_path, WebKit.CookiePersistentStorage.SQLITE)
+    cookies.set_accept_policy(WebKit.CookieAcceptPolicy.NO_THIRD_PARTY)
+    try:
+        os.chmod(cookie_path, 0o600)
+    except OSError:
+        pass
     return session
 
 
+def _http_uri(uri: str | None) -> bool:
+    if not uri:
+        return False
+    parts = urlsplit(uri)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+def _console_uri(uri: str | None) -> bool:
+    """True when the URL belongs on the internal console."""
+    if not _http_uri(uri):
+        return False
+    host = (urlsplit(uri).hostname or "").lower()
+    return host == _CONSOLE_HOST or host.endswith("." + _CONSOLE_HOST)
+
+
+def _navigation_uri(uri: str | None) -> bool:
+    """Console pages plus WebKit's blank placeholder."""
+    if not uri:
+        return False
+    parts = urlsplit(uri)
+    if parts.scheme == "about" and (parts.path in ("blank", "") or parts.netloc == "blank"):
+        return True
+    return _console_uri(uri)
+
+
 def open_externally(widget: Gtk.Widget, uri: str) -> None:
+    if not _http_uri(uri):
+        return
     root = widget.get_root()
     launcher = Gtk.UriLauncher(uri=uri)
     launcher.launch(root if isinstance(root, Gtk.Window) else None, None, None)
@@ -64,12 +142,7 @@ class WebTab(Gtk.Overlay):
 
         self.view = WebKit.WebView(
             network_session=session,
-            settings=WebKit.Settings(
-                enable_developer_extras=True,
-                enable_smooth_scrolling=True,
-                media_playback_requires_user_gesture=True,
-                enable_back_forward_navigation_gestures=True,
-            ),
+            settings=_webkit_settings(),
         )
         self.view.set_vexpand(True)
         self.view.set_background_color(draw.rgba(theme.BG_WINDOW))
@@ -100,6 +173,8 @@ class WebTab(Gtk.Overlay):
             self.load(self.url)
 
     def load(self, uri: str) -> None:
+        if not _console_uri(uri):
+            return
         self._blocked = False
         self.failed = False
         self.error.set_visible(False)
@@ -151,20 +226,31 @@ class WebTab(Gtk.Overlay):
     def _on_create(self, _view, action: WebKit.NavigationAction):
         """Refuse the popup window and follow it in this tab instead."""
         uri = action.get_request().get_uri()
-        if uri:
+        if _console_uri(uri):
             # WebKit is mid-decision; navigating has to wait for the unwind.
             GLib.idle_add(self.load, uri)
         return None
 
     def _on_decide_policy(self, _view, decision: WebKit.PolicyDecision,
                           kind: WebKit.PolicyDecisionType) -> bool:
+        if kind == WebKit.PolicyDecisionType.NAVIGATION_ACTION:
+            action = decision.get_navigation_action()
+            uri = action.get_request().get_uri()
+            if not _navigation_uri(uri):
+                self._blocked = True
+                decision.ignore()
+                return True
+            return False
+
         if kind == WebKit.PolicyDecisionType.NEW_WINDOW_ACTION:
             # No popups in a half-height pane, and sending them to the system
             # browser would lose the session that sign-in flows rely on, so
             # they open in place instead. Alt+Left goes back.
             action = decision.get_navigation_action()
+            uri = action.get_request().get_uri()
             decision.ignore()
-            GLib.idle_add(self.load, action.get_request().get_uri())
+            if _console_uri(uri):
+                GLib.idle_add(self.load, uri)
             return True
 
         if kind != WebKit.PolicyDecisionType.RESPONSE:
@@ -173,6 +259,11 @@ class WebTab(Gtk.Overlay):
             return False
 
         response = decision.get_response()
+        uri = response.get_uri()
+        if not _console_uri(uri):
+            self._blocked = True
+            decision.ignore()
+            return True
         status = response.get_status_code()
         if status >= 400:
             self._blocked = True

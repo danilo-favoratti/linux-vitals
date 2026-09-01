@@ -10,7 +10,7 @@ import argparse
 import platform
 import socket
 import sys
-import time
+from pathlib import Path
 
 import gi
 
@@ -19,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import bootstrap, prefs, theme  # noqa: E402
+from .apps import AppHub  # noqa: E402
 from .config import (  # noqa: E402
     APP_ID,
     APP_NAME,
@@ -30,10 +31,6 @@ from .config import (  # noqa: E402
 )
 from .monitor import MonitorView, PAGES  # noqa: E402
 from .sampler import Sampler  # noqa: E402
-
-# Process enumeration dominates the tick cost, so when its table is hidden we
-# only refresh it occasionally to keep counters and GPU client names current.
-BACKGROUND_PROC_EVERY = 4
 
 
 def redraw_tree(widget: Gtk.Widget) -> None:
@@ -50,21 +47,44 @@ def redraw_tree(widget: Gtk.Widget) -> None:
         child = child.get_next_sibling()
 
 
+def _iter_monitors(display: Gdk.Display | None):
+    if display is None:
+        return
+    monitors = display.get_monitors()
+    for i in range(monitors.get_n_items()):
+        yield monitors.get_item(i)
+
+
+def pick_monitor(display: Gdk.Display | None):
+    """Prefer a portrait screen (the desk panel); otherwise the primary."""
+    portrait = None
+    first = None
+    for monitor in _iter_monitors(display):
+        if first is None:
+            first = monitor
+        geom = monitor.get_geometry()
+        if geom.height > geom.width and portrait is None:
+            portrait = monitor
+    return portrait or first
+
+
 def portrait_size(display: Gdk.Display | None) -> tuple[int, int]:
-    """A 9:16 window as tall as the screen comfortably allows."""
+    """A 9:16 window that actually fits the screen it will land on."""
     width_limit, height_limit = 1200, 1000
-    if display is not None:
-        monitors = display.get_monitors()
-        if monitors.get_n_items():
-            geometry = monitors.get_item(0).get_geometry()
-            width_limit, height_limit = geometry.width, geometry.height
+    monitor = pick_monitor(display)
+    if monitor is not None:
+        geometry = monitor.get_geometry()
+        width_limit, height_limit = geometry.width, geometry.height
 
     height = min(int(height_limit * 0.92), 1400)
     width = round(height * ASPECT)
-    if width > width_limit * 0.55:
-        width = int(width_limit * 0.55)
+    if width > width_limit * 0.98:
+        width = int(width_limit * 0.98)
         height = round(width / ASPECT)
-    return max(420, width), max(680, height)
+    if height > height_limit * 0.98:
+        height = int(height_limit * 0.98)
+        width = round(height * ASPECT)
+    return max(360, width), max(520, height)
 
 
 class VitalsWindow(Adw.ApplicationWindow):
@@ -85,10 +105,10 @@ class VitalsWindow(Adw.ApplicationWindow):
         self.add_css_class("vitals")
 
         self.toast_overlay = Adw.ToastOverlay()
-        self.monitor = MonitorView(sampler, self.toast_overlay)
+        self.hub = app.hub if isinstance(app, VitalsApp) else AppHub()
+        self.monitor = MonitorView(sampler, self.toast_overlay, self.hub)
         self.monitor.pause_button.connect("toggled", self._on_pause_toggled)
-        self.monitor.stack.connect("notify::visible-child",
-                                   lambda *_: self._refresh_now())
+        self.monitor.stack.connect("notify::visible-child", self._on_page_changed)
 
         header = Adw.HeaderBar()
         header.add_css_class("pane-bar")
@@ -117,7 +137,10 @@ class VitalsWindow(Adw.ApplicationWindow):
         self.set_content(self.toast_overlay)
 
         self._install_shortcuts()
-        self.start()
+        # Sample only after the surface exists. Doing it from __init__ via idle
+        # can run before the first map, and a stall there leaves a process
+        # with no visible window.
+        self.connect("map", self._on_mapped)
 
     # -- web half --------------------------------------------------------
 
@@ -340,8 +363,19 @@ class VitalsWindow(Adw.ApplicationWindow):
     # -- tick loop -------------------------------------------------------
 
     def start(self) -> None:
+        if self._tick_source is not None:
+            return
+        self.sampler.set_want_processes(self.monitor.wants_processes)
+        self.sampler.start_loop(self.interval_ms)
         self._schedule()
         GLib.idle_add(self._refresh_now)
+
+    def _on_mapped(self, *_args) -> None:
+        self.start()
+
+    def _on_page_changed(self, *_args) -> None:
+        self.sampler.set_want_processes(self.monitor.wants_processes)
+        self._refresh_now()
 
     def _schedule(self) -> None:
         if self._tick_source is not None:
@@ -351,6 +385,7 @@ class VitalsWindow(Adw.ApplicationWindow):
     def _on_rate_action(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         self.interval_ms = value.get_int32()
         action.set_state(value)
+        self.sampler.set_interval_ms(self.interval_ms)
         self._schedule()
         self._toast(f"Refreshing every {self.interval_ms / 1000:g}s")
 
@@ -360,37 +395,34 @@ class VitalsWindow(Adw.ApplicationWindow):
             "media-playback-start-symbolic" if self.paused
             else "media-playback-pause-symbolic"
         )
+        self.sampler.set_paused(self.paused)
         if self.paused:
             if self._tick_source is not None:
                 GLib.source_remove(self._tick_source)
                 self._tick_source = None
+            self._refresh_now()
         else:
             self._schedule()
 
     def _on_tick(self) -> bool:
         self._tick_count += 1
-        self._refresh(from_timer=True)
+        self._refresh()
         return True
 
     def _refresh_now(self) -> bool:
-        self._refresh(from_timer=False)
+        self._refresh()
         return False
 
-    def _refresh(self, from_timer: bool) -> None:
-        want_procs = (
-            self.monitor.wants_processes
-            or not from_timer
-            or self._tick_count % BACKGROUND_PROC_EVERY == 0
-        )
-        started = time.perf_counter()
-        snapshot = self.sampler.sample(want_processes=want_procs)
-        self.monitor.update(snapshot, processes_fresh=want_procs)
-        cost_ms = (time.perf_counter() - started) * 1000
-
+    def _refresh(self, *_args) -> None:
+        snapshot = self.sampler.latest()
+        try:
+            self.monitor.update(snapshot, processes_fresh=True)
+        except Exception:
+            return
         self.monitor.set_status(
             f"{socket.gethostname()} · {platform.system()} "
             f"{platform.release().split('-')[0]} · up {theme.fmt_secs(snapshot.uptime)}"
-            f" · {snapshot.proc_count} proc · {cost_ms:.0f} ms"
+            f" · {snapshot.proc_count} proc · {snapshot.sample_ms:.0f} ms"
             f" · {self.interval_ms / 1000:g}s"
             + ("  · PAUSED" if self.paused else "")
         )
@@ -405,6 +437,7 @@ class VitalsApp(Adw.Application):
                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.monitor_only = monitor_only
         self.sampler: Sampler | None = None
+        self.hub = AppHub()
         self.css = Gtk.CssProvider()
         self.connect("shutdown", self._on_shutdown)
 
@@ -435,13 +468,27 @@ class VitalsApp(Adw.Application):
                 window.on_theme_changed()
 
     def do_activate(self) -> None:
-        window = self.props.active_window
-        if window is None:
-            self.sampler = Sampler()
-            window = VitalsWindow(self, self.sampler, monitor_only=self.monitor_only)
-        window.present()
+        try:
+            window = self.props.active_window
+            if window is None:
+                self.sampler = Sampler()
+                window = VitalsWindow(self, self.sampler,
+                                      monitor_only=self.monitor_only)
+            window.set_visible(True)
+            window.present()
+        except Exception:
+            import traceback
+            log = Path(GLib.get_user_cache_dir()) / "vitals" / "crash.log"
+            try:
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text(traceback.format_exc())
+            except OSError:
+                pass
+            traceback.print_exc()
+            raise
 
     def _on_shutdown(self, *_args) -> None:
+        self.hub.shutdown()
         if self.sampler is not None:
             self.sampler.shutdown()
 

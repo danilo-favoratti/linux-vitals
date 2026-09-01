@@ -30,6 +30,10 @@ restart. A thin progress bar tracks loading, and HTTP errors get a readable
 screen with retry and sign-in buttons instead of a blank page.
 
 📈 **System monitor (bottom)** — the six pages below, on an icon switcher.
+The Overview page starts with start/stop controls for the sibling
+**Finances** and **Health** stacks (backend + frontend), plus a button to
+open each app in the browser. Health is launched on 8001/5174 so both can
+run at the same time; finances keeps 8000/5173.
 
 Drag the divider to give either half more room, or use **Even split** and
 **Reset to 9:16** in the menu. `--monitor-only` starts without the web half.
@@ -184,6 +188,7 @@ vitals/
   config.py          app identity, web tab URLs, refresh rates
   prefs.py           the remembered theme choice
   app.py             portrait window, actions, tick loop
+  apps.py            start/stop the sibling finances and health stacks
   webpane.py         web console: tabs, session, error handling
   monitor.py         monitor half: pages and switcher
   sampler.py         metric collection and rolling history

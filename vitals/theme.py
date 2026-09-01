@@ -216,8 +216,17 @@ window.vitals {{ background-color: {BG_WINDOW}; }}
 .statusbar {{
     background-color: {BG_CARD};
     border-top: 1px solid {BORDER};
+}}
+.statusbar label {{
     font-size: 11px;
     color: {TEXT_DIM};
+}}
+.statusbar-clock, .statusbar-self {{
+    font-feature-settings: "tnum";
+    font-variant-numeric: tabular-nums;
+}}
+.statusbar-self {{
+    font-weight: 600;
 }}
 .web-progress, .web-progress trough, .web-progress progress {{ min-height: 3px; }}
 .web-progress trough {{ background: transparent; border: none; }}
@@ -278,6 +287,112 @@ columnview > header > button {{
 columnview row:selected {{ background-color: {css_rgba(CPU, 0.22)}; }}
 /* Tighter rows: the table shares the window with the web console. */
 columnview > listview > row > cell {{ padding-top: 3px; padding-bottom: 3px; }}
+.app-service {{
+    background-color: {css_rgba(TEXT, 0.045)};
+    border: 1px solid {css_rgba(TEXT, 0.08)};
+    border-left: 3px solid {TEXT_FAINT};
+    border-radius: 8px;
+    padding: 8px 10px;
+}}
+.app-service-running {{
+    background-color: {css_rgba(MEM, 0.10)};
+    border-color: {css_rgba(MEM, 0.22)};
+    border-left-color: {MEM};
+}}
+.app-service-busy {{
+    background-color: {css_rgba(SWAP, 0.10)};
+    border-color: {css_rgba(SWAP, 0.22)};
+    border-left-color: {SWAP};
+}}
+.app-service-error {{
+    background-color: {css_rgba(TEMP, 0.10)};
+    border-color: {css_rgba(TEMP, 0.22)};
+    border-left-color: {TEMP};
+}}
+.app-dot {{
+    min-width: 9px;
+    min-height: 9px;
+    border-radius: 99px;
+    background-color: {TEXT_FAINT};
+}}
+.app-dot-running {{ background-color: {MEM}; }}
+.app-dot-starting, .app-dot-stopping {{ background-color: {SWAP}; }}
+.app-dot-error {{ background-color: {TEMP}; }}
+.app-role {{
+    font-size: 12px;
+    font-weight: 700;
+    color: {TEXT};
+}}
+.app-port {{
+    font-size: 11px;
+    font-family: monospace;
+    font-feature-settings: "tnum";
+    color: {TEXT_DIM};
+}}
+.app-chip {{
+    border-radius: 999px;
+    padding: 2px 8px;
+    color: {TEXT_DIM};
+    background-color: {css_rgba(TEXT, 0.08)};
+}}
+.app-chip label {{
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}}
+.app-chip-running {{
+    color: {MEM};
+    background-color: {css_rgba(MEM, 0.22)};
+}}
+.app-chip-busy {{
+    color: {SWAP};
+    background-color: {css_rgba(SWAP, 0.22)};
+}}
+.app-chip-error {{
+    color: {TEMP};
+    background-color: {css_rgba(TEMP, 0.22)};
+}}
+.app-open {{
+    font-size: 12px;
+    font-weight: 600;
+    color: {TEXT_DIM};
+    background-color: {css_rgba(TEXT, 0.06)};
+    border: none;
+    box-shadow: none;
+}}
+.app-open:hover {{
+    background-color: {css_rgba(TEXT, 0.10)};
+}}
+.app-open:disabled {{
+    opacity: 0.45;
+}}
+.app-open-ready {{
+    color: {MEM};
+    background-color: {css_rgba(MEM, 0.18)};
+}}
+.app-open-ready:hover {{
+    background-color: {css_rgba(MEM, 0.28)};
+}}
+.app-toggle {{
+    border: none;
+    box-shadow: none;
+    min-width: 28px;
+    min-height: 28px;
+}}
+.app-toggle-start {{
+    color: {MEM};
+    background-color: {css_rgba(MEM, 0.18)};
+}}
+.app-toggle-start:hover {{
+    background-color: {css_rgba(MEM, 0.30)};
+}}
+.app-toggle-stop {{
+    color: {TEMP};
+    background-color: {css_rgba(TEMP, 0.16)};
+}}
+.app-toggle-stop:hover {{
+    background-color: {css_rgba(TEMP, 0.28)};
+}}
 """
 
 _UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
@@ -314,3 +429,18 @@ def fmt_secs(seconds: float) -> str:
     if hours:
         return f"{hours}h {minutes}m"
     return f"{minutes}m"
+
+
+def fmt_live(seconds: float) -> str:
+    """Uptime of this process; seconds stay visible for the first hour."""
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"

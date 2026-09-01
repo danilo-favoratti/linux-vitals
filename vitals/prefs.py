@@ -27,9 +27,21 @@ def load() -> dict:
 def save(**values) -> None:
     """Merge values into the file. A read-only config dir is not fatal."""
     merged = load() | values
+    directory = os.path.dirname(PATH)
+    tmp = PATH + ".tmp"
     try:
-        os.makedirs(os.path.dirname(PATH), exist_ok=True)
-        with open(PATH, "w", encoding="utf-8") as handle:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
+        with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(merged, handle, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, PATH)
+        os.chmod(PATH, 0o600)
     except OSError:
-        pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass

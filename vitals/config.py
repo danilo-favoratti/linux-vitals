@@ -22,5 +22,25 @@ TABS = (
 INTERVALS = (500, 1000, 2000, 3000)
 DEFAULT_INTERVAL = 1000
 
+# Sibling projects under the same parent as this repo. Health uses a different
+# pair of ports so both stacks can run at once; finances keeps the ports its
+# own run.sh already documents.
+LOCAL_APPS = (
+    {
+        "key": "finances",
+        "title": "Finances",
+        "root": "finances",
+        "backend_port": 8000,
+        "frontend_port": 5173,
+    },
+    {
+        "key": "health",
+        "title": "Health",
+        "root": "health",
+        "backend_port": 8001,
+        "frontend_port": 5174,
+    },
+)
+
 # 9:16 portrait, sized to the screen it opens on.
 ASPECT = 9 / 16

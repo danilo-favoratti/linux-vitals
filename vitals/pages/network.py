@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import gi
 import psutil
 
@@ -88,6 +90,8 @@ class NetworkPage(Gtk.Box):
         self.nic_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         self.root.append(self.nic_container)
         self.cards: dict[str, _NicCard] = {}
+        self._addr_cache: dict[str, str] = {}
+        self._addr_at = 0.0
         self.append(ui.scroll(self.root))
 
     def _rebuild(self) -> None:
@@ -100,16 +104,21 @@ class NetworkPage(Gtk.Box):
             return True
         return Sampler.is_physical_nic(name)
 
-    @staticmethod
-    def _addresses(name: str) -> str:
-        try:
-            addrs = psutil.net_if_addrs().get(name, [])
-        except OSError:
-            return ""
-        for addr in addrs:
-            if addr.family.name == "AF_INET":
-                return addr.address
-        return ""
+    def _addresses(self, name: str) -> str:
+        now = time.monotonic()
+        if now - self._addr_at >= 5.0:
+            cache: dict[str, str] = {}
+            try:
+                for iface, addrs in psutil.net_if_addrs().items():
+                    for addr in addrs:
+                        if addr.family.name == "AF_INET":
+                            cache[iface] = addr.address
+                            break
+            except OSError:
+                pass
+            self._addr_cache = cache
+            self._addr_at = now
+        return self._addr_cache.get(name, "")
 
     def update(self, s: Snapshot) -> None:
         self.total_chart.queue_draw()
@@ -122,13 +131,16 @@ class NetworkPage(Gtk.Box):
 
         for name, data in sorted(s.per_nic.items()):
             if not self._visible(name):
+                stale = self.cards.pop(name, None)
+                if stale is not None:
+                    self.nic_container.remove(stale)
                 continue
             card = self.cards.get(name)
             if card is None:
-                series = self.sampler.hist_nic.get(name)
-                if series is None:
-                    continue
+                series = self.sampler.track_nic(name)
                 card = _NicCard(name, series[0], series[1])
                 self.cards[name] = card
                 self.nic_container.append(card)
             card.refresh(data, self._addresses(name))
+        for name in [n for n in self.cards if n not in s.per_nic]:
+            self.nic_container.remove(self.cards.pop(name))

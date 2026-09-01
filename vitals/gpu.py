@@ -112,37 +112,54 @@ class NvidiaBackend:
             "--format=csv,noheader,nounits",
             f"-lms={self._interval_ms}",
         ]
-        try:
-            self._proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        assert self._proc.stdout is not None
-        for line in self._proc.stdout:
-            if self._stop.is_set():
-                break
-            parts = line.split(",")
-            if len(parts) < len(QUERY_FIELDS):
+        while not self._stop.is_set():
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                )
+                self._proc = proc
+            except (OSError, subprocess.SubprocessError):
+                if self._stop.wait(2.0):
+                    return
                 continue
-            vals = [_to_float(p) for p in parts]
-            with self._lock:
-                s = self._sample
-                s.available = True
-                s.name = self._name or "NVIDIA GPU"
-                s.driver = self._driver
-                s.util = vals[0]
-                s.mem_util = vals[1]
-                s.mem_used = vals[2] * 1024 * 1024
-                s.mem_total = vals[3] * 1024 * 1024
-                s.temperature = vals[4]
-                s.power = vals[5]
-                s.fan = vals[6]
-                s.clock_sm = vals[7]
-                s.clock_mem = vals[8]
-                s.encoder = vals[9]
-                s.decoder = vals[10]
+            assert proc.stdout is not None
+            try:
+                for line in proc.stdout:
+                    if self._stop.is_set():
+                        break
+                    parts = line.split(",")
+                    if len(parts) < len(QUERY_FIELDS):
+                        continue
+                    vals = [_to_float(p) for p in parts]
+                    with self._lock:
+                        s = self._sample
+                        s.available = True
+                        s.name = self._name or "NVIDIA GPU"
+                        s.driver = self._driver
+                        s.util = vals[0]
+                        s.mem_util = vals[1]
+                        s.mem_used = vals[2] * 1024 * 1024
+                        s.mem_total = vals[3] * 1024 * 1024
+                        s.temperature = vals[4]
+                        s.power = vals[5]
+                        s.fan = vals[6]
+                        s.clock_sm = vals[7]
+                        s.clock_mem = vals[8]
+                        s.encoder = vals[9]
+                        s.decoder = vals[10]
+            except (OSError, ValueError):
+                pass
+            if proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            self._proc = None
+            if self._stop.wait(2.0):
+                return
 
     def _run_processes(self) -> None:
         """Per-process VRAM needs a separate query; poll it more slowly."""

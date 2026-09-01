@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
+
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from .pages import (  # noqa: E402
     CpuPage,
@@ -17,6 +20,7 @@ from .pages import (  # noqa: E402
     ProcessPage,
 )
 from .sampler import Sampler, Snapshot  # noqa: E402
+from . import apps, theme  # noqa: E402
 
 PAGES = ("overview", "cpu", "memory", "network", "gpu", "processes")
 
@@ -36,7 +40,8 @@ def _switcher(stack: Adw.ViewStack) -> Gtk.Widget:
 
 
 class MonitorView(Gtk.Box):
-    def __init__(self, sampler: Sampler, toast_overlay: Adw.ToastOverlay) -> None:
+    def __init__(self, sampler: Sampler, toast_overlay: Adw.ToastOverlay,
+                 hub: apps.AppHub) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         # Carries the monitor's own surface colors, which the web half above it
         # does not share.
@@ -45,7 +50,7 @@ class MonitorView(Gtk.Box):
 
         self.stack = Adw.ViewStack()
         self.stack.set_vexpand(True)
-        self.overview = OverviewPage(sampler)
+        self.overview = OverviewPage(sampler, hub, toast_overlay)
         self.cpu_page = CpuPage(sampler)
         self.memory_page = MemoryPage(sampler)
         self.network_page = NetworkPage(sampler)
@@ -79,17 +84,38 @@ class MonitorView(Gtk.Box):
         bar.append(switcher)
         bar.append(self.pause_button)
 
+        footer = Gtk.CenterBox()
+        footer.add_css_class("statusbar")
+        footer.set_margin_start(10)
+        footer.set_margin_end(10)
+        footer.set_margin_top(3)
+        footer.set_margin_bottom(3)
+
         self.status = Gtk.Label(label="", xalign=0)
-        self.status.add_css_class("statusbar")
         self.status.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
-        self.status.set_margin_start(10)
-        self.status.set_margin_end(10)
-        self.status.set_margin_top(3)
-        self.status.set_margin_bottom(3)
+        self.status.set_hexpand(True)
+
+        self.self_stats = Gtk.Label(label="")
+        self.self_stats.add_css_class("statusbar-self")
+        self.self_stats.set_halign(Gtk.Align.CENTER)
+        self.self_stats.set_tooltip_text(
+            "Vitals CPU and RAM (this process + WebKit), and how long this session has been up"
+        )
+        self._self_cpu = 0.0
+        self._self_rss = 0.0
+
+        self.clock = Gtk.Label(xalign=1)
+        self.clock.add_css_class("statusbar-clock")
+
+        footer.set_start_widget(self.status)
+        footer.set_center_widget(self.self_stats)
+        footer.set_end_widget(self.clock)
 
         self.append(bar)
         self.append(self.stack)
-        self.append(self.status)
+        self.append(footer)
+        self._update_clock()
+        GLib.timeout_add_seconds(1, self._update_clock)
 
     # -- refresh ---------------------------------------------------------
 
@@ -122,6 +148,21 @@ class MonitorView(Gtk.Box):
             self.gpu_page.update(snapshot)
         if processes_fresh and page == "processes":
             self.process_page.update(snapshot)
+        self._self_cpu = snapshot.self_cpu
+        self._self_rss = snapshot.self_rss
+        self._paint_self()
 
     def set_status(self, text: str) -> None:
         self.status.set_label(text)
+
+    def _paint_self(self) -> None:
+        live = time.monotonic() - self.sampler.started_at
+        self.self_stats.set_label(
+            f"{self._self_cpu:.1f}% CPU  ·  {theme.fmt_bytes(self._self_rss)}  ·  "
+            f"live {theme.fmt_live(live)}"
+        )
+
+    def _update_clock(self) -> bool:
+        self.clock.set_label(datetime.now().strftime("%a %-d %b %Y  %H:%M:%S"))
+        self._paint_self()
+        return True

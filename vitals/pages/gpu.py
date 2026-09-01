@@ -9,7 +9,7 @@ from gi.repository import Gtk  # noqa: E402
 
 from .. import theme, ui  # noqa: E402
 from ..sampler import Sampler, Snapshot  # noqa: E402
-from ..widgets import Chart, MiniBar, Ring, SegmentBar, Trace  # noqa: E402
+from ..widgets import Chart, Ring, SegmentBar, Trace  # noqa: E402
 
 
 class GpuPage(Gtk.Box):
@@ -75,12 +75,12 @@ class GpuPage(Gtk.Box):
         root.append(vram)
 
         clients = ui.Card("Processes Using the GPU", accent=theme.VRAM)
-        self.client_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.client_empty = Gtk.Label(label="No processes are allocating video memory.",
                                       xalign=0)
         self.client_empty.add_css_class("metric-sub")
+        self.clients = ui.TopList(theme.VRAM, rows=12)
         clients.append(self.client_empty)
-        clients.append(self.client_box)
+        clients.append(self.clients)
         root.append(clients)
 
         self.append(ui.scroll(root))
@@ -127,25 +127,14 @@ class GpuPage(Gtk.Box):
 
     def _update_clients(self, s: Snapshot) -> None:
         procs = s.gpu.processes
-        while (child := self.client_box.get_first_child()) is not None:
-            self.client_box.remove(child)
         if not procs:
             self.client_empty.set_visible(True)
+            self.clients.update([])
             return
         self.client_empty.set_visible(False)
         total = s.gpu.mem_total or 1
-        for pid, vram in sorted(procs.items(), key=lambda kv: kv[1], reverse=True):
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            label = Gtk.Label(label=f"{self.sampler.name_for(pid)}  ·  {pid}", xalign=0)
-            label.add_css_class("metric-sub")
-            label.set_size_request(148, -1)
-            label.set_ellipsize(ui.ELLIPSIZE_END)
-            bar = MiniBar(theme.VRAM, height=7)
-            bar.update(vram / total)
-            value = Gtk.Label(label=theme.fmt_bytes(vram), xalign=1)
-            value.add_css_class("metric-sub")
-            value.set_size_request(80, -1)
-            row.append(label)
-            row.append(bar)
-            row.append(value)
-            self.client_box.append(row)
+        ranked = sorted(procs.items(), key=lambda kv: kv[1], reverse=True)[:12]
+        self.clients.update([
+            (f"{self.sampler.name_for(pid)}  ·  {pid}", vram / total, theme.fmt_bytes(vram))
+            for pid, vram in ranked
+        ])
