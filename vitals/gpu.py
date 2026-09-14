@@ -27,6 +27,12 @@ QUERY_FIELDS = [
     "utilization.decoder",
 ]
 
+# Per-process VRAM needs its own `nvidia-smi`, and a spawn every few seconds for
+# days is tens of thousands of NVML initialisations nobody asked for. It only
+# runs while a page is actually showing the client list.
+PROC_INTERVAL = 2.0
+PROC_IDLE_INTERVAL = 10.0
+
 
 @dataclass
 class GpuSample:
@@ -70,6 +76,8 @@ class NvidiaBackend:
         self._sample = GpuSample()
         self._proc: subprocess.Popen[str] | None = None
         self._stop = threading.Event()
+        self._want_processes = threading.Event()
+        self._want_processes.set()  # first read fills the list before any gate
         self._name = self._query_static("name")
         self._driver = self._query_static("driver_version")
         self._sample.name = self._name or "NVIDIA GPU"
@@ -117,7 +125,7 @@ class NvidiaBackend:
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    text=True, bufsize=1,
+                    text=True, bufsize=1, close_fds=True,
                 )
                 self._proc = proc
             except (OSError, subprocess.SubprocessError):
@@ -151,19 +159,38 @@ class NvidiaBackend:
                         s.decoder = vals[10]
             except (OSError, ValueError):
                 pass
-            if proc.poll() is None:
-                proc.kill()
+            finally:
                 try:
-                    proc.wait(timeout=1)
-                except subprocess.TimeoutExpired:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except OSError:
                     pass
-            self._proc = None
+                if proc.poll() is None:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                self._proc = None
             if self._stop.wait(2.0):
                 return
 
+    def set_want_processes(self, want: bool) -> None:
+        if want:
+            self._want_processes.set()
+        else:
+            self._want_processes.clear()
+
     def _run_processes(self) -> None:
         """Per-process VRAM needs a separate query; poll it more slowly."""
-        while not self._stop.wait(2.0):
+        while True:
+            wanted = self._want_processes.is_set()
+            if self._stop.wait(PROC_INTERVAL if wanted else PROC_IDLE_INTERVAL):
+                return
+            if not self._want_processes.is_set():
+                # Leave the last reading in place; a hidden list will not notice
+                # and clearing it only makes the values flicker on the way back.
+                continue
             try:
                 out = subprocess.run(
                     ["nvidia-smi", "--query-compute-apps=pid,used_memory",
@@ -213,6 +240,9 @@ class NullBackend:
 
     def read(self) -> GpuSample:
         return self._sample
+
+    def set_want_processes(self, want: bool) -> None:
+        pass
 
     def shutdown(self) -> None:
         pass

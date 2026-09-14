@@ -57,7 +57,11 @@ def _parse_stat(raw: bytes) -> tuple[str, int, str, int, int, int]:
 
 
 # Helper processes that belong to this window, not to stacks Vitals launched.
-_SELF_CHILD_PREFIXES = ("WebKit", "nvidia-smi")
+# WebKit runs each web process inside bwrap behind a dbus proxy, so the sandbox
+# wrappers have to be walked through as well: stopping at them hides the single
+# largest process in the tree. Local app stacks (uvicorn, npm) are deliberately
+# absent, since those are someone else's cost even when Vitals started them.
+_SELF_CHILD_PREFIXES = ("WebKit", "nvidia-smi", "bwrap", "xdg-dbus-proxy")
 
 
 def _own_cost_pids(root: int) -> list[int]:
@@ -253,6 +257,7 @@ class Sampler:
         self._interval_ms = 1000
         self._tick_count = 0
         self._want_processes = False
+        self._last_err_log = 0.0
 
         psutil.cpu_percent(percpu=True)  # prime the deltas
         psutil.cpu_percent()
@@ -289,6 +294,10 @@ class Sampler:
     def set_want_processes(self, want: bool) -> None:
         self._want_processes = want
 
+    def set_want_gpu_clients(self, want: bool) -> None:
+        """Only pay for the per-process VRAM query while a page displays it."""
+        self.gpu_backend.set_want_processes(want)
+
     def latest(self) -> Snapshot:
         with self._lock:
             return self.snapshot
@@ -310,8 +319,12 @@ class Sampler:
                 snap.sample_ms = (time.perf_counter() - started) * 1000
                 with self._lock:
                     self.snapshot = snap
-            except Exception:
-                pass
+            except Exception as exc:
+                now = time.monotonic()
+                if now - self._last_err_log > 30:
+                    self._last_err_log = now
+                    from .bootstrap import log
+                    log(f"sample failed: {type(exc).__name__}: {exc}")
             elapsed = time.perf_counter() - started
             wait = max(0.05, self._interval_ms / 1000.0 - elapsed)
             self._stop.wait(wait)

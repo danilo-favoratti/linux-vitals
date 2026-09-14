@@ -88,6 +88,13 @@ def _services() -> tuple[Service, ...]:
 SERVICES = _services()
 BY_KEY = {s.key: s for s in SERVICES}
 
+# Probing every service every second is a quarter of a million connects a day
+# into the dev servers, all to watch a state that changes twice a week. The fast
+# cadence is only needed while a start or stop is in flight.
+WATCH_BUSY = 1.0
+WATCH_IDLE = 5.0
+TRANSIENT = ("starting", "stopping")
+
 
 def port_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -227,7 +234,11 @@ class AppHub:
                         self._reconcile(service, listening)
                     except Exception:
                         pass
-            if self._stop.wait(1.0):
+            with self._lock:
+                busy = any(
+                    state.status in TRANSIENT for state in self._states.values()
+                )
+            if self._stop.wait(WATCH_BUSY if busy else WATCH_IDLE):
                 break
 
     def toggle(self, key: str) -> str:

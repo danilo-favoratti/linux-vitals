@@ -27,6 +27,9 @@ PAGES = ("overview", "cpu", "memory", "network", "gpu", "processes")
 # Pages that read from the process table and therefore need a fresh scan.
 PROCESS_PAGES = ("processes", "cpu")
 
+# Pages that show per-process VRAM, the one reading that costs a process spawn.
+GPU_CLIENT_PAGES = ("gpu", "processes")
+
 
 def _switcher(stack: Adw.ViewStack) -> Gtk.Widget:
     """Icon-only page switcher: the pane is far too narrow for labels."""
@@ -115,9 +118,15 @@ class MonitorView(Gtk.Box):
         self.append(self.stack)
         self.append(footer)
         self._update_clock()
-        GLib.timeout_add_seconds(1, self._update_clock)
+        self._clock_source = GLib.timeout_add_seconds(1, self._update_clock)
+        self.connect("unrealize", self._on_unrealize)
 
     # -- refresh ---------------------------------------------------------
+
+    def _on_unrealize(self, *_args) -> None:
+        if getattr(self, "_clock_source", None):
+            GLib.source_remove(self._clock_source)
+            self._clock_source = 0
 
     @property
     def page_name(self) -> str:
@@ -126,6 +135,10 @@ class MonitorView(Gtk.Box):
     @property
     def wants_processes(self) -> bool:
         return self.page_name in PROCESS_PAGES
+
+    @property
+    def wants_gpu_clients(self) -> bool:
+        return self.page_name in GPU_CLIENT_PAGES
 
     def show_page(self, name: str) -> None:
         if name in PAGES:

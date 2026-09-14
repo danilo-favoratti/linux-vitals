@@ -10,7 +10,6 @@ import argparse
 import platform
 import socket
 import sys
-from pathlib import Path
 
 import gi
 
@@ -31,6 +30,9 @@ from .config import (  # noqa: E402
 )
 from .monitor import MonitorView, PAGES  # noqa: E402
 from .sampler import Sampler  # noqa: E402
+
+HOUSEKEEPING_EVERY = 60
+RESOURCE_LOG_EVERY = 600.0
 
 
 def redraw_tree(widget: Gtk.Widget) -> None:
@@ -141,6 +143,8 @@ class VitalsWindow(Adw.ApplicationWindow):
         # can run before the first map, and a stall there leaves a process
         # with no visible window.
         self.connect("map", self._on_mapped)
+        self.connect("close-request", self._on_close_request)
+        self.connect("unrealize", self._clear_tick)
 
     # -- web half --------------------------------------------------------
 
@@ -288,7 +292,7 @@ class VitalsWindow(Adw.ApplicationWindow):
                 action=Gtk.CallbackAction.new(lambda *_: (callback(), True)[1]),
             ))
 
-        add("<Control>q", self.close)
+        add("<Control>q", self._quit_app)
         add("<Control>w", self.close)
         add("<Control>space", lambda: self.monitor.pause_button.set_active(
             not self.paused))
@@ -329,6 +333,13 @@ class VitalsWindow(Adw.ApplicationWindow):
 
     # -- actions ---------------------------------------------------------
 
+    def _quit_app(self) -> None:
+        app = self.get_application()
+        if isinstance(app, VitalsApp):
+            app.request_quit()
+        else:
+            self.close()
+
     def _on_zoom_action(self, _action: Gio.SimpleAction, value: GLib.Variant) -> None:
         step = value.get_int32()
         level = self.web.apply_zoom(step * 0.1, reset=step == 0)
@@ -366,15 +377,31 @@ class VitalsWindow(Adw.ApplicationWindow):
         if self._tick_source is not None:
             return
         self.sampler.set_want_processes(self.monitor.wants_processes)
+        self.sampler.set_want_gpu_clients(self.monitor.wants_gpu_clients)
         self.sampler.start_loop(self.interval_ms)
         self._schedule()
         GLib.idle_add(self._refresh_now)
+
+    def _on_close_request(self, *_args) -> bool:
+        """Keep the process. GNOME destroying the surface used to quit us overnight."""
+        app = self.get_application()
+        if isinstance(app, VitalsApp) and not app._user_quit:
+            bootstrap.log("close-request: hiding")
+            self.set_visible(False)
+            return True
+        return False
+
+    def _clear_tick(self, *_args) -> None:
+        if self._tick_source is not None:
+            GLib.source_remove(self._tick_source)
+            self._tick_source = None
 
     def _on_mapped(self, *_args) -> None:
         self.start()
 
     def _on_page_changed(self, *_args) -> None:
         self.sampler.set_want_processes(self.monitor.wants_processes)
+        self.sampler.set_want_gpu_clients(self.monitor.wants_gpu_clients)
         self._refresh_now()
 
     def _schedule(self) -> None:
@@ -417,7 +444,8 @@ class VitalsWindow(Adw.ApplicationWindow):
         snapshot = self.sampler.latest()
         try:
             self.monitor.update(snapshot, processes_fresh=True)
-        except Exception:
+        except Exception as exc:
+            bootstrap.log(f"monitor update failed: {type(exc).__name__}: {exc}")
             return
         self.monitor.set_status(
             f"{socket.gethostname()} · {platform.system()} "
@@ -439,17 +467,65 @@ class VitalsApp(Adw.Application):
         self.sampler: Sampler | None = None
         self.hub = AppHub()
         self.css = Gtk.CssProvider()
+        self._user_quit = False
+        self._recreate_tries = 0
+        self._housekeeping_source = 0
+        self._last_resource_log = 0.0
         self.connect("shutdown", self._on_shutdown)
 
     def do_startup(self) -> None:
         Adw.Application.do_startup(self)
+        # Keep the process up when GNOME destroys the window (output sleep,
+        # unplug of the portrait panel). Ctrl+Q still calls request_quit().
+        self.hold()
         theme.set_mode(prefs.load().get("theme", theme.DEFAULT_MODE))
         display = Gdk.Display.get_default()
         if display is not None:
             Gtk.StyleContext.add_provider_for_display(
                 display, self.css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
+            monitors = display.get_monitors()
+            monitors.connect("items-changed", self._on_monitors_changed)
         self.refresh_theme()
+        self._housekeeping_source = GLib.timeout_add_seconds(
+            HOUSEKEEPING_EVERY, self._housekeeping
+        )
+        bootstrap.log("app startup")
+
+    def _housekeeping(self) -> bool:
+        """Watch this process's own footprint and reclaim before it is fatal.
+
+        This is what used to end the session after a few days: descriptors and
+        memory climbed while the screen was awake, and the process was either
+        aborted by a WebKit spawn hitting EMFILE or killed outright once it grew
+        into the biggest thing in the session. Both live in the web views, so
+        crossing a budget recycles them instead of waiting for the kill.
+        """
+        count, limit = bootstrap.fd_count(), bootstrap.fd_limit()
+        mb = 1024 * 1024
+        rss_mb = bootstrap.rss_bytes() // mb
+        # Everything charged to Vitals, web processes included; the sampler
+        # already totals this for the footer.
+        tree = self.sampler.latest().self_rss if self.sampler else bootstrap.rss_bytes()
+        tree_mb = int(tree) // mb
+        now = GLib.get_monotonic_time() / 1e6
+        if now - self._last_resource_log >= RESOURCE_LOG_EVERY:
+            self._last_resource_log = now
+            bootstrap.log(
+                f"resources fds={count}/{limit} rss={rss_mb}M tree={tree_mb}M "
+                f"[{bootstrap.fd_breakdown()}]"
+            )
+        reason = ""
+        if bootstrap.fd_pressure():
+            reason = f"fd pressure {count}/{limit}"
+        elif bootstrap.memory_pressure(tree):
+            reason = f"memory pressure {tree_mb}M"
+        if reason:
+            for window in self.get_windows():
+                web = getattr(window, "web", None)
+                if web is not None:
+                    web.recycle(reason)
+        return True
 
     def set_theme(self, mode: str) -> None:
         theme.set_mode(mode)
@@ -469,25 +545,58 @@ class VitalsApp(Adw.Application):
 
     def do_activate(self) -> None:
         try:
-            window = self.props.active_window
-            if window is None:
-                self.sampler = Sampler()
-                window = VitalsWindow(self, self.sampler,
-                                      monitor_only=self.monitor_only)
-            window.set_visible(True)
-            window.present()
+            self._ensure_window()
         except Exception:
             import traceback
-            log = Path(GLib.get_user_cache_dir()) / "vitals" / "crash.log"
-            try:
-                log.parent.mkdir(parents=True, exist_ok=True)
-                log.write_text(traceback.format_exc())
-            except OSError:
-                pass
+            bootstrap.log("activate failed:\n" + traceback.format_exc())
             traceback.print_exc()
             raise
 
+    def request_quit(self) -> None:
+        if self._user_quit:
+            return
+        bootstrap.log("user quit")
+        self._user_quit = True
+        self.release()
+        self.quit()
+
+    def _on_monitors_changed(self, *_args) -> None:
+        bootstrap.log("monitors changed")
+        if not self._user_quit:
+            GLib.timeout_add(500, self._ensure_window)
+
+    def _on_window_destroy(self, window: Gtk.Window) -> None:
+        bootstrap.log(f"window destroyed fds={bootstrap.fd_count()}/{bootstrap.fd_limit()}")
+        if self._user_quit:
+            return
+        self._recreate_tries += 1
+        delay = min(8.0, 0.4 * (2 ** min(self._recreate_tries, 4)))
+        GLib.timeout_add(int(delay * 1000), self._ensure_window)
+
+    def _ensure_window(self) -> bool:
+        if self._user_quit:
+            return False
+        window = self.props.active_window
+        if window is None:
+            windows = self.get_windows()
+            window = windows[0] if windows else None
+        if window is None:
+            bootstrap.log(f"creating window fds={bootstrap.fd_count()}/{bootstrap.fd_limit()}")
+            if self.sampler is None:
+                self.sampler = Sampler()
+            window = VitalsWindow(self, self.sampler,
+                                  monitor_only=self.monitor_only)
+            window.connect("destroy", self._on_window_destroy)
+        window.set_visible(True)
+        window.present()
+        self._recreate_tries = 0
+        return False
+
     def _on_shutdown(self, *_args) -> None:
+        bootstrap.log("app shutdown")
+        if self._housekeeping_source:
+            GLib.source_remove(self._housekeeping_source)
+            self._housekeeping_source = 0
         self.hub.shutdown()
         if self.sampler is not None:
             self.sampler.shutdown()

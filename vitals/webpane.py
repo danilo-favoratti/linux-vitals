@@ -9,6 +9,7 @@ soon as it has something to render.
 from __future__ import annotations
 
 import os
+import time
 from urllib.parse import urlsplit
 
 import gi
@@ -18,13 +19,23 @@ gi.require_version("Adw", "1")
 gi.require_version("WebKit", "6.0")
 from gi.repository import Adw, Gio, GLib, Gtk, WebKit  # noqa: E402
 
-from . import draw, theme  # noqa: E402
+from . import bootstrap, draw, theme  # noqa: E402
 from .config import TABS  # noqa: E402
 
 MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM = 0.5, 2.0, 0.9
 
 # Statuses where the useful next step is "log in", not "retry".
 AUTH_STATUSES = (401, 403, 407)
+
+# A tab nobody is looking at still runs its own web process, its timers and its
+# renderer. Each internal dashboard costs about 600 MB, so once a session had
+# visited all four the tree sat above 2 GB, which is what got it picked off by
+# the session's OOM killer. A backgrounded tab is torn down and reloaded on its
+# next showing instead.
+SUSPEND_AFTER = 120.0
+# Even the visible tab is reloaded eventually: its document heap only ever grows.
+RECYCLE_AFTER = 6 * 3600.0
+HOUSEKEEPING_EVERY = 30
 
 # The console only talks to the cupidoodle internal apps. Anything else
 # (file:, javascript:, a random https host) stays out of this session.
@@ -139,6 +150,10 @@ class WebTab(Gtk.Overlay):
         self.failed = False
         self._loaded = False
         self._blocked = False
+        self._suspended = False
+        # monotonic clocks driving the suspend/recycle policy in WebPane.
+        self.loaded_at = 0.0
+        self.hidden_since = 0.0
 
         self.view = WebKit.WebView(
             network_session=session,
@@ -176,9 +191,35 @@ class WebTab(Gtk.Overlay):
         if not _console_uri(uri):
             return
         self._blocked = False
+        self._suspended = False
         self.failed = False
         self.error.set_visible(False)
+        self.loaded_at = time.monotonic()
         self.view.load_uri(uri)
+
+    def suspend(self) -> None:
+        """Drop the document and its web process; ``ensure_loaded`` brings it back."""
+        if not self._loaded:
+            return
+        self._loaded = False
+        self._suspended = True
+        self.loaded_at = 0.0
+        self.progress.set_visible(False)
+        self.view.stop_loading()
+        # Killing the web process is what actually returns the memory and the
+        # dmabuf/shared-memory descriptors; blanking the view only drops the DOM.
+        terminate = getattr(self.view, "terminate_web_process", None)
+        if terminate is None:
+            self.view.load_uri("about:blank")
+        else:
+            terminate()
+        bootstrap.log(f"web tab suspended: {self.title}")
+
+    def recycle(self) -> None:
+        """Restart a long-running tab from its own URL, dropping the old heap."""
+        bootstrap.log(f"web tab recycled: {self.title}")
+        self._loaded = True
+        self.load(self.url)
 
     def reload(self) -> None:
         self.load(self.view.get_uri() or self.url)
@@ -215,9 +256,11 @@ class WebTab(Gtk.Overlay):
     def _on_load_failed(self, _view, _event, failing_uri: str,
                         error: GLib.Error) -> bool:
         self.progress.set_visible(False)
-        # Our own decide-policy veto also lands here; keep the richer message.
-        if self._blocked or error.matches(WebKit.NetworkError.quark(),
-                                         WebKit.NetworkError.CANCELLED):
+        # Our own decide-policy veto and our own suspend both land here; keep
+        # the richer message in the first case and stay silent in the second.
+        if self._blocked or self._suspended or error.matches(
+            WebKit.NetworkError.quark(), WebKit.NetworkError.CANCELLED
+        ):
             return True
         self.failed = True
         self.error.show_failure(failing_uri, error.message)
@@ -373,6 +416,11 @@ class WebPane(Gtk.Box):
         self._network = Gio.NetworkMonitor.get_default()
         self._network.connect("network-changed", self._on_network_changed)
 
+        self._housekeeping_source = GLib.timeout_add_seconds(
+            HOUSEKEEPING_EVERY, self._housekeeping
+        )
+        self.connect("unrealize", self._on_unrealize)
+
     # -- navigation ------------------------------------------------------
 
     @property
@@ -381,7 +429,43 @@ class WebPane(Gtk.Box):
         return self.tabs[name] if name in self.tabs else next(iter(self.tabs.values()))
 
     def _on_switch(self) -> None:
-        self.current.ensure_loaded()
+        current = self.current
+        now = time.monotonic()
+        for tab in self.tabs.values():
+            if tab is current:
+                tab.hidden_since = 0.0
+            elif not tab.hidden_since:
+                tab.hidden_since = now
+        current.ensure_loaded()
+
+    def _on_unrealize(self, *_args) -> None:
+        if self._housekeeping_source:
+            GLib.source_remove(self._housekeeping_source)
+            self._housekeeping_source = 0
+
+    def _housekeeping(self) -> bool:
+        """Retire tabs nobody is watching and restart the one that is, eventually."""
+        now = time.monotonic()
+        current = self.current
+        for tab in self.tabs.values():
+            if tab is not current and tab.hidden_since:
+                if now - tab.hidden_since >= SUSPEND_AFTER:
+                    tab.suspend()
+        if current.loaded_at and now - current.loaded_at >= RECYCLE_AFTER:
+            current.recycle()
+        return True
+
+    def recycle(self, reason: str) -> None:
+        """Release everything WebKit holds, for when memory or descriptors run short."""
+        bootstrap.log(
+            f"recycling web pane ({reason}) "
+            f"fds={bootstrap.fd_count()}/{bootstrap.fd_limit()}"
+        )
+        current = self.current
+        for tab in self.tabs.values():
+            if tab is not current:
+                tab.suspend()
+        current.recycle()
 
     def _on_network_changed(self, _monitor, available: bool) -> None:
         if not available:
