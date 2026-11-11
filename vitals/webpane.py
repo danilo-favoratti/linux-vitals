@@ -33,9 +33,20 @@ AUTH_STATUSES = (401, 403, 407)
 # the session's OOM killer. A backgrounded tab is torn down and reloaded on its
 # next showing instead.
 SUSPEND_AFTER = 120.0
-# Even the visible tab is reloaded eventually: its document heap only ever grows.
-RECYCLE_AFTER = 6 * 3600.0
+# Even the visible tab is reloaded eventually: its document heap only ever grows,
+# and a SPA that has gone stale in the disk cache otherwise sits frozen.
+RECYCLE_AFTER = 3600.0
 HOUSEKEEPING_EVERY = 30
+
+# HTTP disk cache, service workers and DOM cache — not cookies. An 800 MB
+# WebKitCache was serving yesterday's dashboard bundle as if it were live.
+_CACHE_TYPES = (
+    "DISK_CACHE",
+    "MEMORY_CACHE",
+    "DOM_CACHE",
+    "OFFLINE_APPLICATION_CACHE",
+    "SERVICE_WORKER_REGISTRATIONS",
+)
 
 # The console only talks to the cupidoodle internal apps. Anything else
 # (file:, javascript:, a random https host) stays out of this session.
@@ -91,9 +102,12 @@ def make_session() -> WebKit.NetworkSession:
             os.chmod(path, 0o700)
         except OSError:
             pass
+    _purge_disk_cache(cache_dir)
 
     session = WebKit.NetworkSession.new(data_dir, cache_dir)
     _apply_memory_pressure(session)
+    _set_cache_model()
+    _clear_website_cache(session)
     cookies = session.get_cookie_manager()
     cookie_path = os.path.join(data_dir, "cookies.sqlite")
     cookies.set_persistent_storage(cookie_path, WebKit.CookiePersistentStorage.SQLITE)
@@ -103,6 +117,76 @@ def make_session() -> WebKit.NetworkSession:
     except OSError:
         pass
     return session
+
+
+def _purge_disk_cache(cache_dir: str) -> None:
+    """Drop leftover HTTP/service-worker files. Cookies live under data_dir."""
+    import shutil
+
+    for name in ("WebKitCache", "CacheStorage"):
+        path = os.path.join(cache_dir, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            shutil.rmtree(path)
+            bootstrap.log(f"purged webkit {name}")
+        except OSError as exc:
+            bootstrap.log(f"purge {name} failed: {exc}")
+
+
+def _set_cache_model() -> None:
+    """DOCUMENT_VIEWER skips the persistent HTTP cache a kiosk does not want."""
+    context = getattr(WebKit, "WebContext", None)
+    if context is None:
+        return
+    getter = getattr(context, "get_default", None)
+    setter = getattr(context, "set_cache_model", None)
+    model = getattr(WebKit, "CacheModel", None)
+    if getter is None or setter is None or model is None:
+        return
+    viewer = getattr(model, "DOCUMENT_VIEWER", None)
+    if viewer is None:
+        return
+    try:
+        setter(getter(), viewer)
+    except (TypeError, GLib.Error):
+        pass
+
+
+def _cache_type_mask() -> int:
+    types = getattr(WebKit, "WebsiteDataTypes", None)
+    if types is None:
+        return 0
+    mask = 0
+    for name in _CACHE_TYPES:
+        value = getattr(types, name, None)
+        if value is not None:
+            mask |= int(value)
+    return mask
+
+
+def _clear_website_cache(session: WebKit.NetworkSession) -> None:
+    manager = session.get_website_data_manager()
+    mask = _cache_type_mask()
+    if not mask:
+        return
+    try:
+        manager.clear(mask, 0, None, None)
+    except (TypeError, GLib.Error) as exc:
+        bootstrap.log(f"clear website cache failed: {exc}")
+
+
+def _load_fresh(view: WebKit.WebView, uri: str) -> None:
+    """Fetch the URL, skipping WebKit's HTTP cache."""
+    request = WebKit.URIRequest.new(uri)
+    headers = request.get_http_headers()
+    if headers is not None:
+        try:
+            headers.append("Cache-Control", "no-cache")
+            headers.append("Pragma", "no-cache")
+        except (TypeError, GLib.Error):
+            pass
+    view.load_request(request)
 
 
 def _http_uri(uri: str | None) -> bool:
@@ -195,7 +279,7 @@ class WebTab(Gtk.Overlay):
         self.failed = False
         self.error.set_visible(False)
         self.loaded_at = time.monotonic()
-        self.view.load_uri(uri)
+        _load_fresh(self.view, uri)
 
     def suspend(self) -> None:
         """Drop the document and its web process; ``ensure_loaded`` brings it back."""
@@ -219,10 +303,22 @@ class WebTab(Gtk.Overlay):
         """Restart a long-running tab from its own URL, dropping the old heap."""
         bootstrap.log(f"web tab recycled: {self.title}")
         self._loaded = True
+        session = self.view.get_network_session()
+        if session is not None:
+            _clear_website_cache(session)
         self.load(self.url)
 
     def reload(self) -> None:
-        self.load(self.view.get_uri() or self.url)
+        uri = self.view.get_uri() or self.url
+        if not _console_uri(uri):
+            self.load(self.url)
+            return
+        self._blocked = False
+        self._suspended = False
+        self.failed = False
+        self.error.set_visible(False)
+        self.loaded_at = time.monotonic()
+        self.view.reload_bypass_cache()
 
     def home(self) -> None:
         self.load(self.url)
